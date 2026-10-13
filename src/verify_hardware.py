@@ -28,7 +28,7 @@ async def run_hardware_verification(target_ip: str = "192.168.1.4") -> None:
 
     # Step 2: Connection & Device Info
     print("\n[TEST 2/12] Connecting and retrieving device information...")
-    controller = WizBulbController(target_ip, timeout=4.0)
+    controller = WizBulbController(target_ip, timeout=7.0)
     await controller.connect()
     cap = controller.capabilities
     print(f" -> Model:        {cap.model if cap else 'Unknown'}")

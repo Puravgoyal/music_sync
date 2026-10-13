@@ -73,13 +73,13 @@ class BulbState:
 class WizBulbController:
     """Reusable, validated controller for local WiZ smart bulbs."""
 
-    def __init__(self, ip: str, mac: Optional[str] = None, timeout: float = 5.0) -> None:
+    def __init__(self, ip: str, mac: Optional[str] = None, timeout: float = 7.0) -> None:
         """Initialize controller with validated IP.
 
         Args:
             ip: Target bulb IP address.
             mac: Optional hardware MAC address.
-            timeout: Network operation timeout in seconds.
+            timeout: Network operation timeout in seconds (default 7.0s to accommodate UDP retries).
         """
         self.ip = validate_ip(ip)
         self.mac = mac
