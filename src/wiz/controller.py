@@ -61,13 +61,19 @@ class BulbState:
     rgb: Optional[Tuple[int, int, int]] = None
     colortemp: Optional[int] = None  # Kelvin
     scene_id: Optional[int] = None
+    warm_white: Optional[int] = None
+    cold_white: Optional[int] = None
+    active_mode: Optional[str] = None  # 'scene', 'colortemp', 'rgb', 'white', 'dimming', 'off', 'unknown'
+    raw_pilot: Optional[Dict[str, Any]] = None
 
     def __str__(self) -> str:
         status_str = "ON" if self.is_on else "OFF"
         b_str = f"{self.brightness}/255 ({self.brightness_percent}%)" if self.brightness is not None else "Unknown"
-        rgb_str = f"{self.rgb}" if self.rgb else "None"
-        ct_str = f"{self.colortemp}K" if self.colortemp else "None"
-        return f"State: {status_str} | Brightness: {b_str} | RGB: {rgb_str} | Color Temp: {ct_str}"
+        mode_str = f"Mode: {self.active_mode}" if self.active_mode else ""
+        rgb_str = f"RGB: {self.rgb}" if self.rgb else ""
+        ct_str = f"Color Temp: {self.colortemp}K" if self.colortemp else ""
+        details = [p for p in (status_str, mode_str, f"Brightness: {b_str}", rgb_str, ct_str) if p]
+        return " | ".join(details)
 
 
 class WizBulbController:
@@ -190,6 +196,10 @@ class WizBulbController:
         rgb_val: Optional[Tuple[int, int, int]] = None
         ct_val: Optional[int] = None
         scene_id: Optional[int] = None
+        ww_val: Optional[int] = None
+        cw_val: Optional[int] = None
+        active_mode: Optional[str] = "off" if not is_on else "unknown"
+        raw_pilot: Optional[Dict[str, Any]] = None
 
         if states and states[0]:
             parser: PilotParser = states[0]
@@ -203,6 +213,27 @@ class WizBulbController:
                 
             ct_val = parser.get_colortemp()
             scene_id = parser.get_scene_id()
+            ww_val = parser.get_warm_white()
+            cw_val = parser.get_cold_white()
+
+            pilot_dict = getattr(parser, "pilotResult", {}) or {}
+            raw_pilot = dict(pilot_dict) if isinstance(pilot_dict, dict) else None
+
+            # Determine actual active lighting mode
+            if not is_on:
+                active_mode = "off"
+            elif scene_id is not None and scene_id > 0:
+                active_mode = "scene"
+            elif ct_val is not None and "temp" in pilot_dict:
+                active_mode = "colortemp"
+            elif rgb_val is not None and any(c > 0 for c in rgb_val) and "temp" not in pilot_dict:
+                active_mode = "rgb"
+            elif (ww_val is not None and ww_val > 0) or (cw_val is not None and cw_val > 0):
+                active_mode = "white"
+            elif brightness_val is not None:
+                active_mode = "dimming"
+            else:
+                active_mode = "unknown"
 
         return BulbState(
             is_on=is_on,
@@ -211,7 +242,69 @@ class WizBulbController:
             rgb=rgb_val,
             colortemp=ct_val,
             scene_id=scene_id,
+            warm_white=ww_val,
+            cold_white=cw_val,
+            active_mode=active_mode,
+            raw_pilot=raw_pilot,
         )
+
+    async def restore_state(self, state: BulbState) -> None:
+        """Restore bulb to the specified pre-sync state without inventing fallback values.
+
+        Args:
+            state: Pre-sync BulbState captured prior to music synchronization.
+
+        Raises:
+            WizConnectionError: If controller is not connected.
+            WizControllerError: On communication or timeout errors.
+        """
+        light = self._ensure_connected()
+
+        if not state.is_on:
+            logger.info("[%s] Restoring pre-sync state: Power OFF", self.ip)
+            await self._safe_call(light.turn_off())
+            return
+
+        logger.info("[%s] Restoring pre-sync state (Mode: %s)...", self.ip, state.active_mode or "unknown")
+
+        # 1. Scene mode restoration
+        if state.active_mode == "scene" and state.scene_id:
+            builder = PilotBuilder(scene=state.scene_id, brightness=state.brightness)
+            await self._safe_call(light.turn_on(builder))
+            return
+
+        # 2. Color Temperature (Tunable White) restoration
+        if (state.active_mode == "colortemp" or (state.colortemp is not None and state.rgb is None)) and state.colortemp:
+            if self.capabilities and not self.capabilities.supports_colortemp:
+                logger.warning("[%s] Bulb hardware profile does not support color temp restoration", self.ip)
+            else:
+                builder = PilotBuilder(colortemp=state.colortemp, brightness=state.brightness)
+                await self._safe_call(light.turn_on(builder))
+                return
+
+        # 3. RGB mode restoration
+        if state.active_mode == "rgb" or (state.rgb is not None and any(c > 0 for c in state.rgb)):
+            if self.capabilities and not self.capabilities.supports_rgb:
+                logger.warning("[%s] Bulb hardware profile does not support RGB restoration", self.ip)
+            else:
+                r, g, b = state.rgb
+                b_val = state.brightness if state.brightness is not None else 128
+                await self.set_light_state(r, g, b, b_val)
+                return
+
+        # 4. White channel restoration (warm/cold white)
+        if state.active_mode == "white" or (state.warm_white is not None or state.cold_white is not None):
+            builder = PilotBuilder(warm_white=state.warm_white, cold_white=state.cold_white, brightness=state.brightness)
+            await self._safe_call(light.turn_on(builder))
+            return
+
+        # 5. Brightness only
+        if state.brightness is not None:
+            await self.set_brightness(state.brightness)
+            return
+
+        # 6. Minimal fallback: turn bulb ON if state was ON
+        await self.turn_on()
 
     async def turn_on(self) -> None:
         """Turn the bulb ON."""

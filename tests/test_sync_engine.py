@@ -121,9 +121,10 @@ class TestMusicSyncEngine:
         mock_controller.set_brightness = AsyncMock()
         mock_controller.turn_off = AsyncMock()
         mock_controller.turn_on = AsyncMock()
+        mock_controller.restore_state = AsyncMock()
 
         # Bulb was originally on at warm white 2700K and brightness 120
-        saved_state = BulbState(is_on=True, brightness=120, colortemp=2700, rgb=None)
+        saved_state = BulbState(is_on=True, brightness=120, colortemp=2700, rgb=None, active_mode="colortemp")
         mock_controller.get_state = AsyncMock(return_value=saved_state)
         mock_controller_cls.return_value = mock_controller
 
@@ -133,8 +134,7 @@ class TestMusicSyncEngine:
         assert engine._pre_sync_state == saved_state
         mock_controller.connect.assert_awaited_once()
 
-        # Stop engine: should restore colortemp 2700 and brightness 120
+        # Stop engine: should delegate accurately to controller.restore_state
         await engine.stop()
-        mock_controller.set_colortemp.assert_awaited_once_with(2700)
-        mock_controller.set_brightness.assert_awaited_once_with(120)
+        mock_controller.restore_state.assert_awaited_once_with(saved_state)
         mock_controller.disconnect.assert_awaited_once()

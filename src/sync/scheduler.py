@@ -124,6 +124,11 @@ class BulbCommandScheduler:
             self.dry_run,
         )
 
+    def clear(self) -> None:
+        """Atomically discard any queued pending state."""
+        with self._state_lock:
+            self._pending_state = None
+
     async def stop(self) -> None:
         """Gracefully stop the scheduler worker loop."""
         if not self._running:
@@ -136,6 +141,8 @@ class BulbCommandScheduler:
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
+        with self._state_lock:
+            self._pending_state = None
         logger.info("BulbCommandScheduler stopped cleanly")
 
     async def _worker_loop(self) -> None:
