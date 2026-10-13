@@ -1,0 +1,322 @@
+"""WiZ smart bulb controller abstraction and safe command management."""
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+
+from pywizlight import PilotBuilder, PilotParser, wizlight
+from pywizlight.exceptions import (
+    WizLightConnectionError,
+    WizLightMethodNotFound,
+    WizLightTimeOutError,
+)
+
+from src.utils.network import validate_ip
+
+logger = logging.getLogger("wiz_music_sync.controller")
+
+
+class WizControllerError(Exception):
+    """Base exception for WiZ bulb controller errors."""
+
+
+class WizConnectionError(WizControllerError):
+    """Raised when connection to bulb fails or is unreachable."""
+
+
+class WizTimeoutError(WizControllerError):
+    """Raised when communication with bulb times out."""
+
+
+class UnsupportedFeatureError(WizControllerError):
+    """Raised when requesting a feature not supported by the bulb hardware."""
+
+
+class ValidationError(WizControllerError, ValueError):
+    """Raised when command inputs fail validation."""
+
+
+@dataclass
+class BulbCapabilities:
+    """Hardware capabilities of a WiZ bulb."""
+
+    supports_rgb: bool = True
+    supports_colortemp: bool = True
+    supports_brightness: bool = True
+    supports_effects: bool = True
+    kelvin_range: Tuple[int, int] = (2200, 6500)
+    model: Optional[str] = None
+    firmware_version: Optional[str] = None
+    bulb_class: Optional[str] = None
+
+
+@dataclass
+class BulbState:
+    """Current state of a WiZ bulb."""
+
+    is_on: bool
+    brightness: Optional[int] = None  # 0 - 255 scale
+    brightness_percent: Optional[int] = None  # 0 - 100% scale
+    rgb: Optional[Tuple[int, int, int]] = None
+    colortemp: Optional[int] = None  # Kelvin
+    scene_id: Optional[int] = None
+
+    def __str__(self) -> str:
+        status_str = "ON" if self.is_on else "OFF"
+        b_str = f"{self.brightness}/255 ({self.brightness_percent}%)" if self.brightness is not None else "Unknown"
+        rgb_str = f"{self.rgb}" if self.rgb else "None"
+        ct_str = f"{self.colortemp}K" if self.colortemp else "None"
+        return f"State: {status_str} | Brightness: {b_str} | RGB: {rgb_str} | Color Temp: {ct_str}"
+
+
+class WizBulbController:
+    """Reusable, validated controller for local WiZ smart bulbs."""
+
+    def __init__(self, ip: str, mac: Optional[str] = None, timeout: float = 5.0) -> None:
+        """Initialize controller with validated IP.
+
+        Args:
+            ip: Target bulb IP address.
+            mac: Optional hardware MAC address.
+            timeout: Network operation timeout in seconds.
+        """
+        self.ip = validate_ip(ip)
+        self.mac = mac
+        self.timeout = float(timeout)
+        self._light: Optional[wizlight] = None
+        self.capabilities: Optional[BulbCapabilities] = None
+        self._is_connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether controller is connected and initialized."""
+        return self._is_connected
+
+    async def connect(self) -> None:
+        """Initialize connection, retrieve hardware profile and initial state."""
+        logger.info("Connecting to WiZ bulb at %s...", self.ip)
+        self._light = wizlight(self.ip, mac=self.mac)
+        
+        try:
+            # Query bulb type and capabilities
+            bulb_type = await self._safe_call(self._light.get_bulbtype())
+            if bulb_type:
+                model_name = getattr(bulb_type, "name", None)
+                fw_ver = getattr(bulb_type, "fw_version", None)
+                bulb_cls = getattr(bulb_type.bulb_type, "value", str(bulb_type.bulb_type)) if hasattr(bulb_type, "bulb_type") else None
+                
+                k_min, k_max = 2200, 6500
+                kr = getattr(bulb_type, "kelvin_range", None)
+                if kr and hasattr(kr, "min") and hasattr(kr, "max"):
+                    try:
+                        k_min = int(kr.min)
+                        k_max = int(kr.max)
+                    except (TypeError, ValueError):
+                        k_min, k_max = 2200, 6500
+                    
+                feats = getattr(bulb_type, "features", None)
+                self.capabilities = BulbCapabilities(
+                    supports_rgb=bool(getattr(feats, "color", True)) if feats else True,
+                    supports_colortemp=bool(getattr(feats, "color_tmp", True)) if feats else True,
+                    supports_brightness=bool(getattr(feats, "brightness", True)) if feats else True,
+                    supports_effects=bool(getattr(feats, "effect", True)) if feats else True,
+                    kelvin_range=(k_min, k_max),
+                    model=model_name,
+                    firmware_version=fw_ver,
+                    bulb_class=bulb_cls,
+                )
+            else:
+                # Default fallback capabilities if type query returned None
+                self.capabilities = BulbCapabilities()
+
+            # Retrieve MAC if missing
+            if not self.mac:
+                try:
+                    self.mac = await self._safe_call(self._light.getMac())
+                except Exception as exc:
+                    logger.debug("MAC query failed on %s: %s", self.ip, exc)
+
+            # Mark connected before reading initial state
+            self._is_connected = True
+
+            # Query initial state
+            await self.get_state()
+            logger.info("Successfully connected to WiZ bulb %s (MAC: %s)", self.ip, self.mac or "Unknown")
+
+        except Exception:
+            self._is_connected = False
+            await self.close()
+            raise
+
+    async def _safe_call(self, coro: Any) -> Any:
+        """Execute a WiZ coroutine with timeout and unified error mapping."""
+        try:
+            return await asyncio.wait_for(coro, timeout=self.timeout)
+        except (asyncio.TimeoutError, WizLightTimeOutError) as exc:
+            logger.error("WiZ bulb %s operation timed out after %.1fs", self.ip, self.timeout)
+            raise WizTimeoutError(f"Operation timed out after {self.timeout}s on bulb {self.ip}") from exc
+        except (WizLightConnectionError, OSError) as exc:
+            logger.error("Connection error communicating with WiZ bulb %s: %s", self.ip, exc)
+            raise WizConnectionError(f"Connection error to bulb {self.ip}: {exc}") from exc
+        except WizLightMethodNotFound as exc:
+            logger.error("Unsupported method on WiZ bulb %s: %s", self.ip, exc)
+            raise UnsupportedFeatureError(f"Method not supported by bulb: {exc}") from exc
+
+    def _ensure_connected(self) -> wizlight:
+        """Verify connection state and return underlying wizlight instance."""
+        if not self._light or not self._is_connected:
+            raise WizConnectionError("Bulb controller is not connected. Call connect() first.")
+        return self._light
+
+    async def get_state(self) -> BulbState:
+        """Retrieve the current state of the bulb.
+
+        Returns:
+            BulbState dataclass with power, brightness, RGB, and Kelvin.
+        """
+        light = self._ensure_connected()
+        states = await self._safe_call(light.updateState())
+        is_on = bool(light.status)
+
+        brightness_val: Optional[int] = None
+        brightness_pct: Optional[int] = None
+        rgb_val: Optional[Tuple[int, int, int]] = None
+        ct_val: Optional[int] = None
+        scene_id: Optional[int] = None
+
+        if states and states[0]:
+            parser: PilotParser = states[0]
+            brightness_val = parser.get_brightness()
+            if brightness_val is not None:
+                brightness_pct = round((brightness_val / 255.0) * 100)
+            
+            raw_rgb = parser.get_rgb()
+            if raw_rgb and all(v is not None for v in raw_rgb):
+                rgb_val = (int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2]))
+                
+            ct_val = parser.get_colortemp()
+            scene_id = parser.get_scene_id()
+
+        return BulbState(
+            is_on=is_on,
+            brightness=brightness_val,
+            brightness_percent=brightness_pct,
+            rgb=rgb_val,
+            colortemp=ct_val,
+            scene_id=scene_id,
+        )
+
+    async def turn_on(self) -> None:
+        """Turn the bulb ON."""
+        light = self._ensure_connected()
+        logger.info("[%s] Sending command: TURN ON", self.ip)
+        await self._safe_call(light.turn_on())
+
+    async def turn_off(self) -> None:
+        """Turn the bulb OFF."""
+        light = self._ensure_connected()
+        logger.info("[%s] Sending command: TURN OFF", self.ip)
+        await self._safe_call(light.turn_off())
+
+    async def set_brightness(self, brightness: int) -> None:
+        """Set the bulb brightness.
+
+        Args:
+            brightness: Integer in the range [0, 255].
+                        0 turns the bulb off. 1-255 sets brightness.
+
+        Raises:
+            ValidationError: If brightness is not an integer or outside [0, 255].
+        """
+        if not isinstance(brightness, int) or isinstance(brightness, bool):
+            raise ValidationError(
+                f"Brightness must be an integer, got {type(brightness).__name__}: {brightness}"
+            )
+        if not (0 <= brightness <= 255):
+            raise ValidationError(
+                f"Brightness must be in range [0, 255], got {brightness}"
+            )
+
+        if self.capabilities and not self.capabilities.supports_brightness:
+            raise UnsupportedFeatureError("Bulb hardware does not support brightness adjustments.")
+
+        light = self._ensure_connected()
+        if brightness == 0:
+            logger.info("[%s] Brightness 0 specified; turning bulb OFF", self.ip)
+            await self._safe_call(light.turn_off())
+        else:
+            logger.info("[%s] Sending command: SET BRIGHTNESS %d/255", self.ip, brightness)
+            await self._safe_call(light.turn_on(PilotBuilder(brightness=brightness)))
+
+    async def set_rgb(self, r: int, g: int, b: int) -> None:
+        """Set the bulb RGB color.
+
+        Args:
+            r: Red channel [0, 255].
+            g: Green channel [0, 255].
+            b: Blue channel [0, 255].
+
+        Raises:
+            ValidationError: If any channel is not an integer or outside [0, 255].
+            UnsupportedFeatureError: If bulb does not support RGB color.
+        """
+        for name, val in (("Red", r), ("Green", g), ("Blue", b)):
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ValidationError(f"{name} channel must be an integer, got {type(val).__name__}: {val}")
+            if not (0 <= val <= 255):
+                raise ValidationError(f"{name} channel must be in range [0, 255], got {val}")
+
+        if self.capabilities and not self.capabilities.supports_rgb:
+            raise UnsupportedFeatureError(f"Bulb at {self.ip} does not support RGB color control.")
+
+        light = self._ensure_connected()
+        logger.info("[%s] Sending command: SET RGB (%d, %d, %d)", self.ip, r, g, b)
+        await self._safe_call(light.turn_on(PilotBuilder(rgb=(r, g, b))))
+
+    async def set_colortemp(self, kelvin: int) -> None:
+        """Set color temperature (tunable white) in Kelvin.
+
+        Args:
+            kelvin: Color temperature in Kelvin within the bulb's supported range.
+
+        Raises:
+            ValidationError: If kelvin is not an integer or outside supported range.
+            UnsupportedFeatureError: If bulb does not support tunable white.
+        """
+        if not isinstance(kelvin, int) or isinstance(kelvin, bool):
+            raise ValidationError(f"Color temperature must be an integer, got {type(kelvin).__name__}: {kelvin}")
+
+        if self.capabilities and not self.capabilities.supports_colortemp:
+            raise UnsupportedFeatureError(f"Bulb at {self.ip} does not support color temperature control.")
+
+        min_k, max_k = (2200, 6500)
+        if self.capabilities and self.capabilities.kelvin_range:
+            min_k, max_k = self.capabilities.kelvin_range
+
+        if not (min_k <= kelvin <= max_k):
+            raise ValidationError(
+                f"Color temperature {kelvin}K out of supported range [{min_k}K, {max_k}K]"
+            )
+
+        light = self._ensure_connected()
+        logger.info("[%s] Sending command: SET COLOR TEMPERATURE %dK", self.ip, kelvin)
+        await self._safe_call(light.turn_on(PilotBuilder(colortemp=kelvin)))
+
+    async def close(self) -> None:
+        """Clean up network socket and close connection."""
+        self._is_connected = False
+        if self._light:
+            try:
+                await self._light.async_close()
+            except Exception as exc:
+                logger.debug("Exception closing bulb %s: %s", self.ip, exc)
+            finally:
+                self._light = None
+
+    async def __aenter__(self) -> "WizBulbController":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
