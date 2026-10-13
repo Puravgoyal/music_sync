@@ -288,8 +288,11 @@ class WizBulbController:
                 logger.warning("[%s] Bulb hardware profile does not support RGB restoration", self.ip)
             else:
                 r, g, b = state.rgb
-                b_val = state.brightness if state.brightness is not None else 128
-                await self.set_light_state(r, g, b, b_val)
+                if state.brightness is not None:
+                    await self.set_light_state(r, g, b, state.brightness)
+                else:
+                    builder = PilotBuilder(rgb=(r, g, b))
+                    await self._safe_call(light.turn_on(builder))
                 return
 
         # 4. White channel restoration (warm/cold white)

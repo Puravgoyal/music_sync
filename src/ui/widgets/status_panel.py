@@ -139,14 +139,21 @@ class StatusPanel(QGroupBox):
             )
             self.dry_run_chk.setEnabled(True)
 
-    def set_busy_state(self, text: str) -> None:
+    def set_busy_state(self, text: str, allow_cancel: bool = False) -> None:
         """Set transitory state (e.g. Connecting...)."""
         self.status_badge.setText(f"STATUS: {text.upper()}")
         self.status_badge.setStyleSheet(
             "background-color: #78350f; color: #fbbf24; border: 1px solid #b45309; "
             "border-radius: 4px; padding: 4px 10px; font-weight: 700; font-size: 11px;"
         )
-        self.toggle_btn.setEnabled(False)
+        if allow_cancel:
+            self.toggle_btn.setText("⏹  CANCEL STARTUP")
+            self.toggle_btn.setObjectName("stopSyncButton")
+            self.toggle_btn.setStyle(self.toggle_btn.style())
+            self.toggle_btn.setEnabled(True)
+            self._is_running = True
+        else:
+            self.toggle_btn.setEnabled(False)
 
     def reset_button_enabled(self) -> None:
         self.toggle_btn.setEnabled(True)
