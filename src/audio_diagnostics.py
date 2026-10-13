@@ -178,13 +178,48 @@ def main() -> int:
         print("Press Ctrl+C to stop capture.")
     print("=" * 65 + "\n")
 
+    class DiagnosticSummary:
+        """Accumulates streaming telemetry and metrics with O(1) constant memory."""
+
+        def __init__(self) -> None:
+            self.total_frames: int = 0
+            self.peak_rms: float = 0.0
+            self.sum_rms: float = 0.0
+            self.peak_bass: float = 0.0
+            self.sum_bass: float = 0.0
+            self.peak_mid: float = 0.0
+            self.sum_mid: float = 0.0
+            self.peak_treble: float = 0.0
+            self.sum_treble: float = 0.0
+            self.onsets_count: int = 0
+            self.silent_count: int = 0
+            self.sum_latency: float = 0.0
+            self.sum_dsp: float = 0.0
+
+        def update(self, metrics: AudioMetrics, stats: CaptureStats) -> None:
+            self.total_frames += 1
+            self.peak_rms = max(self.peak_rms, metrics.rms)
+            self.sum_rms += metrics.rms
+            self.peak_bass = max(self.peak_bass, metrics.bass)
+            self.sum_bass += metrics.bass
+            self.peak_mid = max(self.peak_mid, metrics.mid)
+            self.sum_mid += metrics.mid
+            self.peak_treble = max(self.peak_treble, metrics.treble)
+            self.sum_treble += metrics.treble
+            if metrics.is_onset:
+                self.onsets_count += 1
+            if metrics.is_silent:
+                self.silent_count += 1
+            self.sum_latency += stats.estimated_latency_ms
+            self.sum_dsp += stats.analysis_time_ms
+
     latest_data = {"metrics": None, "stats": None}
-    history = []
+    summary = DiagnosticSummary()
 
     def on_metrics_received(metrics: AudioMetrics, stats: CaptureStats) -> None:
         latest_data["metrics"] = metrics
         latest_data["stats"] = stats
-        history.append((metrics, stats))
+        summary.update(metrics, stats)
 
     capture = AudioCapture(
         device=target_device,
@@ -221,41 +256,33 @@ def main() -> int:
         print("\nAudio diagnostics stopped cleanly.")
 
     # Print summary if frames were recorded
-    if history:
-        all_m = [item[0] for item in history]
-        all_s = [item[1] for item in history]
-        total_frames = len(all_m)
+    if summary.total_frames > 0:
+        total_frames = summary.total_frames
         total_time = max(0.01, time.perf_counter() - start_time)
         measured_fps = total_frames / total_time
-        peak_rms = max(m.rms for m in all_m)
-        avg_rms = sum(m.rms for m in all_m) / total_frames
-        peak_bass = max(m.bass for m in all_m)
-        avg_bass = sum(m.bass for m in all_m) / total_frames
-        peak_mid = max(m.mid for m in all_m)
-        avg_mid = sum(m.mid for m in all_m) / total_frames
-        peak_treble = max(m.treble for m in all_m)
-        avg_treble = sum(m.treble for m in all_m) / total_frames
-        onsets_count = sum(1 for m in all_m if m.is_onset)
-        avg_latency = sum(s.estimated_latency_ms for s in all_s) / len(all_s)
-        avg_dsp = sum(s.analysis_time_ms for s in all_s) / len(all_s)
-        silent_count = sum(1 for m in all_m if m.is_silent)
+        avg_rms = summary.sum_rms / total_frames
+        avg_bass = summary.sum_bass / total_frames
+        avg_mid = summary.sum_mid / total_frames
+        avg_treble = summary.sum_treble / total_frames
+        avg_latency = summary.sum_latency / total_frames
+        avg_dsp = summary.sum_dsp / total_frames
 
         print("\n" + "=" * 65)
         print("               LIVE AUDIO ANALYSIS SUMMARY")
         print("=" * 65)
-        print(f"Device:             {target_device.clean_name()}")
-        print(f"Duration:           {total_time:.1f} seconds")
-        print(f"Total Frames:       {total_frames} frames")
-        print(f"Processing Rate:    {measured_fps:.1f} FPS")
-        print(f"Average Latency:    {avg_latency:.1f} ms")
-        print(f"DSP Compute Time:   {avg_dsp:.2f} ms")
-        print(f"RMS Amplitude:      Peak: {peak_rms:.3f} | Avg: {avg_rms:.3f}")
-        print(f"Bass Energy:        Peak: {peak_bass:.2f} | Avg: {avg_bass:.2f}")
-        print(f"Mid Energy:         Peak: {peak_mid:.2f} | Avg: {avg_mid:.2f}")
-        print(f"Treble Energy:      Peak: {peak_treble:.2f} | Avg: {avg_treble:.2f}")
-        print(f"Musical Beats/Hits: {onsets_count} onsets detected")
-        print(f"Silence Ratio:      {(silent_count / total_frames) * 100:.1f}%")
-        print(f"Dropped Frames:     {capture.last_stats.dropped_frames if capture.last_stats else 0}")
+        print(f"Device:                 {target_device.clean_name()}")
+        print(f"Duration:               {total_time:.1f} seconds")
+        print(f"Total Frames:           {total_frames} frames")
+        print(f"Processing Rate:        {measured_fps:.1f} FPS")
+        print(f"Est. Audio Latency:     {avg_latency:.1f} ms (Buffer + DSP)")
+        print(f"DSP Compute Time:       {avg_dsp:.2f} ms")
+        print(f"RMS Amplitude:          Peak: {summary.peak_rms:.3f} | Avg: {avg_rms:.3f}")
+        print(f"Bass Energy:            Peak: {summary.peak_bass:.2f} | Avg: {avg_bass:.2f}")
+        print(f"Mid Energy:             Peak: {summary.peak_mid:.2f} | Avg: {avg_mid:.2f}")
+        print(f"Treble Energy:          Peak: {summary.peak_treble:.2f} | Avg: {avg_treble:.2f}")
+        print(f"Musical Beats/Hits:     {summary.onsets_count} onsets detected")
+        print(f"Silence Ratio:          {(summary.silent_count / total_frames) * 100:.1f}%")
+        print(f"Dropped Frames:         {capture.last_stats.dropped_frames if capture.last_stats else 0}")
         print("=" * 65)
 
     return 0

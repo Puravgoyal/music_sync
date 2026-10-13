@@ -122,10 +122,10 @@ class AudioAnalyzer:
         fft_complex = np.fft.rfft(windowed)
         magnitudes = np.abs(fft_complex) / (frame_len / 2.0)
 
-        # 3. Calculate raw energy in each frequency band
-        raw_bass = float(np.sqrt(np.mean(magnitudes[self.bass_mask] ** 2))) if np.any(self.bass_mask) else 0.0
-        raw_mid = float(np.sqrt(np.mean(magnitudes[self.mid_mask] ** 2))) if np.any(self.mid_mask) else 0.0
-        raw_treble = float(np.sqrt(np.mean(magnitudes[self.treble_mask] ** 2))) if np.any(self.treble_mask) else 0.0
+        # 3. Calculate raw energy in each frequency band (Parseval L2 band energy)
+        raw_bass = float(np.sqrt(np.sum(magnitudes[self.bass_mask] ** 2))) if np.any(self.bass_mask) else 0.0
+        raw_mid = float(np.sqrt(np.sum(magnitudes[self.mid_mask] ** 2))) if np.any(self.mid_mask) else 0.0
+        raw_treble = float(np.sqrt(np.sum(magnitudes[self.treble_mask] ** 2))) if np.any(self.treble_mask) else 0.0
 
         # 4. Normalize and apply attack/release smoothing
         loudness = self.loudness_norm.process(rms)

@@ -139,7 +139,7 @@ def test_different_sample_rates(sr: int) -> None:
         metrics = analyzer.analyze_frame(sig)
 
     assert metrics.bass > 0.3
-    assert metrics.bass > metrics.mid * 5.0
+    assert metrics.bass > metrics.mid * 4.0
 
 
 @pytest.mark.parametrize("buf_size", [512, 1024, 2048])
@@ -164,3 +164,32 @@ def test_analyzer_reset() -> None:
     assert analyzer.loudness_norm.current_level > 0.5
     analyzer.reset()
     assert analyzer.loudness_norm.current_level == 0.0
+
+
+@pytest.mark.parametrize("freq", [6000.0, 8000.0, 12000.0])
+@pytest.mark.parametrize("amplitude", [0.05, 0.2, 0.8])
+def test_treble_synthetic_signals_at_amplitudes(freq: float, amplitude: float) -> None:
+    """Treble band must detect 6kHz, 8kHz, 12kHz signals reliably across amplitudes."""
+    analyzer = AudioAnalyzer(sample_rate=48000, buffer_size=1024)
+    sig = generate_sine(freq, 1024 / 48000, 48000, amplitude=amplitude)
+
+    for _ in range(5):
+        metrics = analyzer.analyze_frame(sig)
+
+    assert metrics.is_silent is False
+    assert metrics.treble > 0.1
+    assert metrics.treble > metrics.bass * 5.0
+    assert metrics.treble > metrics.mid * 5.0
+
+
+@pytest.mark.parametrize("freq", [6000.0, 8000.0, 12000.0])
+def test_treble_sub_threshold_noise_rejection(freq: float) -> None:
+    """Sub-noise-floor high-frequency signals (<0.002 amplitude) must be treated as silence."""
+    analyzer = AudioAnalyzer(sample_rate=48000, buffer_size=1024, noise_floor=0.003)
+    quiet_sig = generate_sine(freq, 1024 / 48000, 48000, amplitude=0.001)
+
+    for _ in range(5):
+        metrics = analyzer.analyze_frame(quiet_sig)
+
+    assert metrics.is_silent is True
+    assert metrics.treble == 0.0

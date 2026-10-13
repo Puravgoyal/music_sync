@@ -93,6 +93,11 @@ class WizBulbController:
         """Whether controller is connected and initialized."""
         return self._is_connected
 
+    @property
+    def is_on(self) -> bool:
+        """Whether bulb is reported as turned on."""
+        return bool(self._light and getattr(self._light, "status", False))
+
     async def connect(self) -> None:
         """Initialize connection, retrieve hardware profile and initial state."""
         logger.info("Connecting to WiZ bulb at %s...", self.ip)
@@ -149,13 +154,14 @@ class WizBulbController:
             await self.close()
             raise
 
-    async def _safe_call(self, coro: Any) -> Any:
+    async def _safe_call(self, coro: Any, timeout: Optional[float] = None) -> Any:
         """Execute a WiZ coroutine with timeout and unified error mapping."""
+        effective_timeout = timeout if timeout is not None else self.timeout
         try:
-            return await asyncio.wait_for(coro, timeout=self.timeout)
+            return await asyncio.wait_for(coro, timeout=effective_timeout)
         except (asyncio.TimeoutError, WizLightTimeOutError) as exc:
-            logger.error("WiZ bulb %s operation timed out after %.1fs", self.ip, self.timeout)
-            raise WizTimeoutError(f"Operation timed out after {self.timeout}s on bulb {self.ip}") from exc
+            logger.error("WiZ bulb %s operation timed out after %.1fs", self.ip, effective_timeout)
+            raise WizTimeoutError(f"Operation timed out after {effective_timeout}s on bulb {self.ip}") from exc
         except (WizLightConnectionError, OSError) as exc:
             logger.error("Connection error communicating with WiZ bulb %s: %s", self.ip, exc)
             raise WizConnectionError(f"Connection error to bulb {self.ip}: {exc}") from exc
@@ -274,6 +280,46 @@ class WizBulbController:
         logger.info("[%s] Sending command: SET RGB (%d, %d, %d)", self.ip, r, g, b)
         await self._safe_call(light.turn_on(PilotBuilder(rgb=(r, g, b))))
 
+    async def set_light_state(
+        self,
+        r: int,
+        g: int,
+        b: int,
+        brightness: int,
+        timeout: Optional[float] = None,
+    ) -> None:
+        """Set both RGB color and brightness in a single combined UDP message.
+
+        Args:
+            r: Red channel [0, 255].
+            g: Green channel [0, 255].
+            b: Blue channel [0, 255].
+            brightness: Brightness level [0, 255]. If 0, turns bulb off.
+            timeout: Optional custom timeout in seconds (useful for low-latency streaming).
+        """
+        for name, val in (("Red", r), ("Green", g), ("Blue", b)):
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise ValidationError(f"{name} channel must be an integer, got {type(val).__name__}: {val}")
+            if not (0 <= val <= 255):
+                raise ValidationError(f"{name} channel must be in range [0, 255], got {val}")
+
+        if not isinstance(brightness, int) or isinstance(brightness, bool):
+            raise ValidationError(f"Brightness must be an integer, got {type(brightness).__name__}: {brightness}")
+        if not (0 <= brightness <= 255):
+            raise ValidationError(f"Brightness must be in range [0, 255], got {brightness}")
+
+        if self.capabilities and not self.capabilities.supports_rgb:
+            raise UnsupportedFeatureError(f"Bulb at {self.ip} does not support RGB color control.")
+
+        light = self._ensure_connected()
+        if brightness == 0:
+            logger.debug("[%s] Streaming command: TURN OFF", self.ip)
+            await self._safe_call(light.turn_off(), timeout=timeout)
+        else:
+            logger.debug("[%s] Streaming command: SET RGB (%d, %d, %d) @ %d/255", self.ip, r, g, b, brightness)
+            builder = PilotBuilder(rgb=(r, g, b), brightness=brightness)
+            await self._safe_call(light.turn_on(builder), timeout=timeout)
+
     async def set_colortemp(self, kelvin: int) -> None:
         """Set color temperature (tunable white) in Kelvin.
 
@@ -313,6 +359,10 @@ class WizBulbController:
                 logger.debug("Exception closing bulb %s: %s", self.ip, exc)
             finally:
                 self._light = None
+
+    async def disconnect(self) -> None:
+        """Alias for close()."""
+        await self.close()
 
     async def __aenter__(self) -> "WizBulbController":
         await self.connect()

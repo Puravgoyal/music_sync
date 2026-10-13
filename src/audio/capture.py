@@ -28,12 +28,23 @@ class CaptureStats:
 
     sample_rate: int
     buffer_size: int
-    buffer_duration_ms: float
+    buffer_duration_ms: float  # Buffer chunk duration: (buffer_size / sample_rate) * 1000
     fps: float  # Audio frames analyzed per second
-    analysis_time_ms: float  # DSP analysis time for current frame
-    estimated_latency_ms: float  # Total audio buffer + DSP latency estimate
+    analysis_time_ms: float  # DSP execution time per frame (windowing, FFT, flux)
+    estimated_latency_ms: float  # Estimated audio-to-analysis pipeline latency
     frames_processed: int
     dropped_frames: int
+    queue_delay_ms: float = 0.0  # Buffer dwell time in bounded queue before worker dispatch
+
+    @property
+    def dsp_execution_time_ms(self) -> float:
+        """Alias for analysis_time_ms."""
+        return self.analysis_time_ms
+
+    @property
+    def estimated_audio_latency_ms(self) -> float:
+        """Alias for estimated_latency_ms."""
+        return self.estimated_latency_ms
 
 
 class AudioCapture:
@@ -157,6 +168,7 @@ class AudioCapture:
                 estimated_latency_ms=estimated_latency_ms,
                 frames_processed=self._frames_processed,
                 dropped_frames=self._dropped_frames,
+                queue_delay_ms=max(0.0, queue_delay_ms),
             )
             self._last_stats = stats
 
