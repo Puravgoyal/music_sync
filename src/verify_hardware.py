@@ -6,25 +6,38 @@ connected physical WiZ bulb with pauses to allow visual confirmation.
 
 import asyncio
 import sys
+from typing import Optional
 
 from src.wiz.controller import WizBulbController
 from src.wiz.discovery import discover_devices
 
 
-async def run_hardware_verification(target_ip: str = "192.168.1.4") -> None:
+async def run_hardware_verification(target_ip: Optional[str] = None) -> None:
     print("=" * 60)
     print("       WiZ Music Sync — Live Hardware Verification")
     print("=" * 60)
-    print(f"Target Bulb IP: {target_ip}\n")
 
-    # Step 1: Discovery verification
-    print("[TEST 1/12] Verifying Automatic Discovery...")
-    devices = await discover_devices(timeout=3.0, fetch_details=False)
-    discovered_ips = [d.ip for d in devices]
-    if target_ip in discovered_ips:
-        print(f" -> PASS: Bulb found on local network: {target_ip}")
+    # Step 1: Discovery verification / Target IP resolution
+    print("[TEST 1/12] Resolving target WiZ bulb...")
+    if not target_ip:
+        print(" -> Scanning local network for WiZ bulbs...")
+        devices = await discover_devices(timeout=3.5, fetch_details=False)
+        if not devices:
+            print(" -> ERROR: No WiZ bulbs discovered on the local network.")
+            print("    Please provide the IP manually: python -m src.verify_hardware <bulb-ip>")
+            sys.exit(1)
+        target_ip = devices[0].ip
+        print(f" -> PASS: Automatically discovered bulb at {target_ip}")
     else:
-        print(f" -> WARNING: Direct connection will be used (discovered: {discovered_ips})")
+        print(f" -> Using specified target bulb IP: {target_ip}")
+        devices = await discover_devices(timeout=3.0, fetch_details=False)
+        discovered_ips = [d.ip for d in devices]
+        if target_ip in discovered_ips:
+            print(f" -> PASS: Confirmed bulb reachable via broadcast: {target_ip}")
+        else:
+            print(f" -> INFO: Direct connection will be used for {target_ip}")
+
+    print(f"\nTarget Bulb IP: {target_ip}\n")
 
     # Step 2: Connection & Device Info
     print("\n[TEST 2/12] Connecting and retrieving device information...")
@@ -122,5 +135,5 @@ async def run_hardware_verification(target_ip: str = "192.168.1.4") -> None:
 
 
 if __name__ == "__main__":
-    ip = sys.argv[1] if len(sys.argv) > 1 else "192.168.1.4"
-    asyncio.run(run_hardware_verification(ip))
+    target = sys.argv[1] if len(sys.argv) > 1 else None
+    asyncio.run(run_hardware_verification(target))
