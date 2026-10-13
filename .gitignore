@@ -5,8 +5,8 @@ __pycache__/
 *.so
 .Python
 build/
-develop-eggs/
 dist/
+*.spec
 downloads/
 eggs/
 .eggs/
