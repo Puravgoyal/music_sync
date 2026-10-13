@@ -75,6 +75,17 @@ def parse_args() -> argparse.Namespace:
         help="Audio buffer size in frames (default: 1024).",
     )
     parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="Duration in seconds to run capture before stopping automatically.",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Run without prompting, using default audio device automatically.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -83,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def select_device(preferred_index: Optional[int]) -> Optional[AudioDevice]:
+def select_device(preferred_index: Optional[int], interactive: bool = True) -> Optional[AudioDevice]:
     devices = get_audio_output_devices()
     if not devices:
         print("[ERROR] No compatible Windows audio output loopback devices found.")
@@ -96,12 +107,17 @@ def select_device(preferred_index: Optional[int]) -> Optional[AudioDevice]:
             return target
         print(f"[WARNING] Device index {preferred_index} not found. Available devices:\n")
 
-    print("\nAvailable Windows Audio Output Loopback Devices:")
-    print("-" * 65)
     default_dev: Optional[AudioDevice] = None
     for dev in devices:
         if dev.is_default:
             default_dev = dev
+
+    if not interactive and default_dev:
+        return default_dev
+
+    print("\nAvailable Windows Audio Output Loopback Devices:")
+    print("-" * 65)
+    for dev in devices:
         print(f"  {dev}")
     print("-" * 65)
 
@@ -110,7 +126,7 @@ def select_device(preferred_index: Optional[int]) -> Optional[AudioDevice]:
 
     if default_dev:
         print(f"\nDefault active device: {default_dev.clean_name()} (Index {default_dev.index})")
-    
+
     try:
         user_choice = input(
             f"\nEnter device index to capture [Press Enter for default ({default_dev.index if default_dev else 0})]: "
@@ -143,7 +159,8 @@ def main() -> int:
         print("=" * 65)
         return 0
 
-    target_device = select_device(args.device)
+    interactive_mode = not args.non_interactive and (args.duration is None and args.device is None)
+    target_device = select_device(args.device, interactive=interactive_mode)
     if not target_device:
         print("[ERROR] Could not select a valid audio output device.")
         return 1
@@ -155,14 +172,19 @@ def main() -> int:
     print(f"Sample Rate:      {target_device.sample_rate} Hz")
     print(f"Channels:         {target_device.channels}")
     print(f"Buffer Size:      {args.buffer_size} frames")
-    print("Press Ctrl+C to stop capture.")
+    if args.duration:
+        print(f"Duration:         {args.duration:.1f} seconds")
+    else:
+        print("Press Ctrl+C to stop capture.")
     print("=" * 65 + "\n")
 
     latest_data = {"metrics": None, "stats": None}
+    history = []
 
     def on_metrics_received(metrics: AudioMetrics, stats: CaptureStats) -> None:
         latest_data["metrics"] = metrics
         latest_data["stats"] = stats
+        history.append((metrics, stats))
 
     capture = AudioCapture(
         device=target_device,
@@ -170,6 +192,7 @@ def main() -> int:
         on_metrics=on_metrics_received,
     )
 
+    start_time = time.perf_counter()
     try:
         capture.start()
         last_render_time = time.perf_counter()
@@ -178,13 +201,15 @@ def main() -> int:
         while True:
             time.sleep(0.01)
             now = time.perf_counter()
+
+            if args.duration and (now - start_time >= args.duration):
+                break
+
             if now - last_render_time >= refresh_interval:
                 m = latest_data["metrics"]
                 s = latest_data["stats"]
                 if m is not None and s is not None:
-                    # Move cursor up 8 lines and rewrite
                     block = format_diagnostics(m, s, target_device.clean_name())
-                    # Write block with carriage returns
                     sys.stdout.write(f"\r\033[K{block}\n\033[8A")
                     sys.stdout.flush()
                 last_render_time = now
@@ -193,7 +218,45 @@ def main() -> int:
         print("\n\nStopping audio capture...")
     finally:
         capture.stop()
-        print("Audio diagnostics stopped cleanly.")
+        print("\nAudio diagnostics stopped cleanly.")
+
+    # Print summary if frames were recorded
+    if history:
+        all_m = [item[0] for item in history]
+        all_s = [item[1] for item in history]
+        total_frames = len(all_m)
+        total_time = max(0.01, time.perf_counter() - start_time)
+        measured_fps = total_frames / total_time
+        peak_rms = max(m.rms for m in all_m)
+        avg_rms = sum(m.rms for m in all_m) / total_frames
+        peak_bass = max(m.bass for m in all_m)
+        avg_bass = sum(m.bass for m in all_m) / total_frames
+        peak_mid = max(m.mid for m in all_m)
+        avg_mid = sum(m.mid for m in all_m) / total_frames
+        peak_treble = max(m.treble for m in all_m)
+        avg_treble = sum(m.treble for m in all_m) / total_frames
+        onsets_count = sum(1 for m in all_m if m.is_onset)
+        avg_latency = sum(s.estimated_latency_ms for s in all_s) / len(all_s)
+        avg_dsp = sum(s.analysis_time_ms for s in all_s) / len(all_s)
+        silent_count = sum(1 for m in all_m if m.is_silent)
+
+        print("\n" + "=" * 65)
+        print("               LIVE AUDIO ANALYSIS SUMMARY")
+        print("=" * 65)
+        print(f"Device:             {target_device.clean_name()}")
+        print(f"Duration:           {total_time:.1f} seconds")
+        print(f"Total Frames:       {total_frames} frames")
+        print(f"Processing Rate:    {measured_fps:.1f} FPS")
+        print(f"Average Latency:    {avg_latency:.1f} ms")
+        print(f"DSP Compute Time:   {avg_dsp:.2f} ms")
+        print(f"RMS Amplitude:      Peak: {peak_rms:.3f} | Avg: {avg_rms:.3f}")
+        print(f"Bass Energy:        Peak: {peak_bass:.2f} | Avg: {avg_bass:.2f}")
+        print(f"Mid Energy:         Peak: {peak_mid:.2f} | Avg: {avg_mid:.2f}")
+        print(f"Treble Energy:      Peak: {peak_treble:.2f} | Avg: {avg_treble:.2f}")
+        print(f"Musical Beats/Hits: {onsets_count} onsets detected")
+        print(f"Silence Ratio:      {(silent_count / total_frames) * 100:.1f}%")
+        print(f"Dropped Frames:     {capture.last_stats.dropped_frames if capture.last_stats else 0}")
+        print("=" * 65)
 
     return 0
 
