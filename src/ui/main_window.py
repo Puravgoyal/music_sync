@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from src.audio.devices import AudioDevice
 from src.config.preferences import AppPreferences, PreferencesManager
 from src.effects import EffectSettings
+from src.sync.state import RestorationReport, RestorationResult
 from src.ui.widgets.audio_panel import AudioPanel
 from src.ui.widgets.device_panel import DevicePanel
 from src.ui.widgets.effects_panel import EffectsPanel
@@ -334,7 +335,21 @@ class MainWindow(QMainWindow):
         self.device_panel.set_controls_enabled(True)
         self.audio_panel.set_controls_enabled(True)
         self.spectrum_view.update_metrics(None)
-        self.statusBar.showMessage("Music sync stopped. Bulb state restored.")
+
+        report = self.worker.last_restoration_report
+        if report:
+            if report.result == RestorationResult.SUCCESS:
+                msg = f"Music sync stopped. {report.result.value} ({report.details})."
+            elif report.result == RestorationResult.SKIPPED:
+                msg = f"Music sync stopped. {report.result.value}."
+            elif report.result == RestorationResult.UNAVAILABLE:
+                msg = f"Music sync stopped. {report.result.value}."
+            else:  # FAILED
+                msg = f"Music sync stopped. {report.result.value}: {report.details}."
+            self.statusBar.showMessage(msg, 7000)
+            logger.info("Sync stopped: %s", msg)
+        else:
+            self.statusBar.showMessage("Music sync stopped.", 5000)
 
     def _on_sync_error(self, error_msg: str) -> None:
         self._telemetry_timer.stop()
@@ -357,6 +372,7 @@ class MainWindow(QMainWindow):
     def _on_worker_closed(self) -> None:
         """Slot invoked once background worker finishes stopping and terminates cleanly."""
         self._is_closed = True
+        self.worker.shutdown_loop(timeout=1.0)
         if self._is_closing:
             self.close()
 
@@ -365,6 +381,7 @@ class MainWindow(QMainWindow):
         if self._is_closed or self.worker.state == SyncState.CLOSED:
             self._telemetry_timer.stop()
             self._save_preferences()
+            self.worker.shutdown_loop(timeout=1.0)
             event.accept()
             return
 
@@ -372,7 +389,7 @@ class MainWindow(QMainWindow):
             self._is_closed = True
             self._telemetry_timer.stop()
             self._save_preferences()
-            self.worker.request_close()
+            self.worker.shutdown_loop(timeout=1.0)
             event.accept()
             return
 

@@ -11,7 +11,7 @@ from src.audio.capture import AudioCapture, CaptureStats
 from src.audio.devices import AudioDevice, get_default_output_device, get_device_by_index
 from src.effects import BaseMusicEffect, EffectSettings, get_effect
 from src.sync.scheduler import BulbCommandScheduler
-from src.sync.state import LightingState, SyncStatus
+from src.sync.state import LightingState, RestorationReport, RestorationResult, SyncStatus
 from src.wiz.controller import BulbState, WizBulbController
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ class MusicSyncEngine:
         self._last_metrics: Optional[AudioMetrics] = None
         self._last_stats: Optional[CaptureStats] = None
         self._last_target_state: LightingState = LightingState()
+        self._last_scheduler_metrics = None
 
     @property
     def is_running(self) -> bool:
@@ -233,11 +234,15 @@ class MusicSyncEngine:
         except Exception as exc:
             logger.error("Error processing audio frame in effect: %s", exc, exc_info=True)
 
-    async def stop(self) -> None:
-        """Gracefully stop synchronization, restore previous bulb state, and disconnect."""
+    async def stop(self) -> RestorationReport:
+        """Gracefully stop synchronization, restore previous bulb state, and disconnect.
+
+        Returns:
+            RestorationReport with explicit outcome (SUCCESS, SKIPPED, UNAVAILABLE, FAILED).
+        """
         async with self._lifecycle_lock:
             if not self._is_running:
-                return
+                return RestorationReport(RestorationResult.SKIPPED, "Engine was not running")
 
             logger.info("Stopping MusicSyncEngine...")
             self._is_running = False
@@ -253,18 +258,31 @@ class MusicSyncEngine:
             # 2. Stop rate-limited scheduler
             if self._scheduler:
                 try:
+                    self._last_scheduler_metrics = self._scheduler.get_metrics()
                     await self._scheduler.stop()
                 except Exception as exc:
                     logger.error("Error stopping command scheduler: %s", exc)
                 self._scheduler = None
 
             # 3. Restore pre-sync bulb state (no competing network traffic exists now)
-            if not self.dry_run and self._controller and self._controller.is_connected and self.restore_state and self._pre_sync_state:
+            resto_report: RestorationReport
+            if self.dry_run:
+                resto_report = RestorationReport(RestorationResult.SKIPPED, "Dry-run mode (no hardware modified)")
+            elif not self.restore_state:
+                resto_report = RestorationReport(RestorationResult.SKIPPED, "User disabled state restoration")
+            elif not self._pre_sync_state:
+                resto_report = RestorationReport(RestorationResult.UNAVAILABLE, "Pre-sync state was not captured")
+            elif not self._controller or not self._controller.is_connected:
+                resto_report = RestorationReport(RestorationResult.FAILED, "Bulb controller disconnected prior to restore")
+            else:
                 try:
                     logger.info("Restoring pre-sync bulb state: %s", self._pre_sync_state)
                     await self._restore_bulb_state(self._pre_sync_state)
+                    mode_name = self._pre_sync_state.active_mode or "original"
+                    resto_report = RestorationReport(RestorationResult.SUCCESS, f"Restored {mode_name} state")
                 except Exception as exc:
                     logger.warning("Failed to restore pre-sync bulb state: %s", exc)
+                    resto_report = RestorationReport(RestorationResult.FAILED, str(exc))
 
             # 4. Disconnect controller
             if self._controller:
@@ -274,7 +292,8 @@ class MusicSyncEngine:
                     logger.error("Error disconnecting WiZ controller: %s", exc)
                 self._controller = None
 
-            logger.info("MusicSyncEngine shut down cleanly")
+            logger.info("MusicSyncEngine shut down cleanly (Restoration: %s)", resto_report)
+            return resto_report
 
     async def _restore_bulb_state(self, state: BulbState) -> None:
         """Restore bulb to its state before music synchronization began."""
@@ -290,7 +309,9 @@ class MusicSyncEngine:
         with self._effect_lock:
             eff_name = self._effect.name
 
-        sched_metrics = self._scheduler.get_metrics() if self._scheduler else None
+        sched_metrics = (
+            self._scheduler.get_metrics() if self._scheduler else self._last_scheduler_metrics
+        )
         dev_name = self._selected_device.name if self._selected_device else None
 
         return SyncStatus(

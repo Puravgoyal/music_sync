@@ -1,6 +1,8 @@
 """Packaging smoke tests verifying the built Windows executable."""
 
+import json
 from pathlib import Path
+import subprocess
 import pytest
 
 
@@ -28,10 +30,11 @@ def test_packaged_resources_and_binaries() -> None:
     assert pyside6_dir.exists(), f"PySide6 directory not found in _internal: {pyside6_dir}"
 
 
-def test_executable_runtime_execution() -> None:
-    """Smoke test executing the frozen Windows executable in a subprocess."""
-    import subprocess
+def test_executable_runtime_execution(tmp_path) -> None:
+    """Smoke test executing the frozen Windows executable in a subprocess, verifying GUI initialization,
 
+    widgets, events, stylesheet, diagnostic reports, and clean thread shutdown.
+    """
     project_root = Path(__file__).parent.parent
     exe_file = project_root / "dist" / "WiZMusicSync" / "WiZMusicSync.exe"
     assert exe_file.exists(), f"Executable not found: {exe_file}"
@@ -46,12 +49,25 @@ def test_executable_runtime_execution() -> None:
     assert result.returncode == 0, f"Executable failed with code {result.returncode}: {result.stderr}"
     assert "WiZ Music Sync" in result.stdout
 
-    # Verify --smoke-test flag executes entrypoint and exits with 0
+    # Verify packaged GUI smoke test with diagnostic file output
+    diag_file = tmp_path / "packaged_gui_smoke_diag.json"
     res_smoke = subprocess.run(
-        [str(exe_file), "--smoke-test"],
+        [str(exe_file), "--smoke-test", "--diag-file", str(diag_file)],
         capture_output=True,
         text=True,
-        timeout=15.0,
+        timeout=25.0,
     )
-    assert res_smoke.returncode == 0, f"Smoke test failed: {res_smoke.stderr}"
-    assert "SMOKE TEST OK" in res_smoke.stdout
+    assert res_smoke.returncode == 0, f"GUI smoke test failed with code {res_smoke.returncode}: {res_smoke.stderr}"
+
+    assert diag_file.exists(), f"Diagnostic file was not created by executable: {diag_file}"
+    with open(diag_file, "r", encoding="utf-8") as f:
+        diag_data = json.load(f)
+
+    assert diag_data["status"] == "passed", f"Diagnostics indicated failure: {diag_data}"
+    assert diag_data["qapp_initialized"] is True
+    assert diag_data["stylesheet_loaded"] is True
+    assert diag_data["main_window_created"] is True
+    assert diag_data["widgets_verified"] is True
+    assert diag_data["events_processed"] is True
+    assert diag_data["window_closed"] is True
+    assert diag_data["threads_terminated"] is True

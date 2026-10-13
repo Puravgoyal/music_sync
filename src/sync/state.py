@@ -66,3 +66,28 @@ class SyncStatus:
     last_command_duration_ms: float
     is_dry_run: bool = False
     pending_states_count: int = 0
+
+
+from enum import Enum
+
+
+class RestorationResult(Enum):
+    """Explicit result category for bulb state restoration on stop."""
+
+    SUCCESS = "Successfully restored"
+    SKIPPED = "Restoration skipped by user preference"
+    UNAVAILABLE = "Restoration unavailable due to missing initial state"
+    FAILED = "Restoration failed"
+
+
+@dataclass
+class RestorationReport:
+    """Explicit report of bulb state restoration result and details."""
+
+    result: RestorationResult
+    details: str = ""
+
+    def __str__(self) -> str:
+        if self.details:
+            return f"{self.result.value} ({self.details})"
+        return self.result.value

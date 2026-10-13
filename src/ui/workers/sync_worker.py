@@ -12,7 +12,7 @@ from src.audio.analyzer import AudioMetrics
 from src.audio.capture import CaptureStats
 from src.effects import EffectSettings
 from src.sync.engine import MusicSyncEngine
-from src.sync.state import SyncStatus
+from src.sync.state import RestorationReport, RestorationResult, SyncStatus
 from src.wiz.controller import WizBulbController
 from src.wiz.discovery import DiscoveredDevice, discover_devices
 
@@ -44,6 +44,7 @@ class SyncWorker(QObject):
     sync_error = Signal(str)  # error description
     bulbs_discovered = Signal(list)  # list of DiscoveredDevice
     bulb_tested = Signal(bool, str)  # (success, message)
+    restoration_completed = Signal(object)  # RestorationReport
     closed = Signal()  # Emitted when background loop and worker are fully terminated
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -56,6 +57,7 @@ class SyncWorker(QObject):
         self._state = SyncState.IDLE
         self._stop_requested = False
         self._close_requested = False
+        self._last_restoration_report: Optional[RestorationReport] = None
 
         self._start_event_loop()
 
@@ -67,7 +69,22 @@ class SyncWorker(QObject):
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
             ready_event.set()
-            self._loop.run_forever()
+            try:
+                self._loop.run_forever()
+            finally:
+                try:
+                    # Cancel any lingering tasks and cleanly shut down async generators
+                    pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                except Exception as exc:
+                    logger.debug("Error during event loop task cleanup: %s", exc)
+                finally:
+                    self._loop.close()
+                    logger.info("Asyncio background loop closed cleanly in worker thread")
 
         self._thread = threading.Thread(target=run_loop, name="WizAsyncLoopThread", daemon=True)
         self._thread.start()
@@ -83,6 +100,15 @@ class SyncWorker(QObject):
     def is_syncing(self) -> bool:
         with self._state_lock:
             return self._state in (SyncState.STARTING, SyncState.RUNNING)
+
+    @property
+    def last_restoration_report(self) -> Optional[RestorationReport]:
+        return self._last_restoration_report
+
+    @property
+    def thread(self) -> Optional[threading.Thread]:
+        """Expose background thread for termination verification in tests."""
+        return self._thread
 
     def discover_bulbs(self, timeout: float = 2.0) -> None:
         """Asynchronously scan the local network for WiZ smart bulbs."""
@@ -106,6 +132,7 @@ class SyncWorker(QObject):
             return
 
         async def _do_test() -> None:
+            controller: Optional[WizBulbController] = None
             try:
                 controller = WizBulbController(ip=ip, timeout=3.5)
                 await controller.connect()
@@ -114,10 +141,15 @@ class SyncWorker(QObject):
                 model = cap.model if cap else "ESP25 WiZ Bulb"
                 fw = cap.firmware_version if cap else "Unknown"
                 msg = f"Connected to {model} (FW: {fw}, MAC: {controller.mac or 'N/A'}) - Currently {state.is_on and 'ON' or 'OFF'}"
-                await controller.disconnect()
                 self.bulb_tested.emit(True, msg)
             except Exception as exc:
                 self.bulb_tested.emit(False, f"Connection failed to {ip}: {exc}")
+            finally:
+                if controller:
+                    try:
+                        await controller.disconnect()
+                    except Exception as disc_exc:
+                        logger.debug("Error disconnecting test controller: %s", disc_exc)
 
         asyncio.run_coroutine_threadsafe(_do_test(), self._loop)
 
@@ -227,18 +259,24 @@ class SyncWorker(QObject):
 
     async def _do_stop_coro(self) -> None:
         """Internal asynchronous stop and state restoration coroutine."""
+        report: Optional[RestorationReport] = None
         try:
             if self._engine:
-                await self._engine.stop()
+                report = await self._engine.stop()
+                self._last_restoration_report = report
                 self._engine = None
         except Exception as exc:
             logger.error("Error stopping engine: %s", exc)
+            report = RestorationReport(RestorationResult.FAILED, str(exc))
+            self._last_restoration_report = report
         finally:
             with self._state_lock:
                 was_close_requested = self._close_requested
                 if not was_close_requested:
                     self._state = SyncState.IDLE
 
+            if report:
+                self.restoration_completed.emit(report)
             self.sync_stopped.emit()
             if not was_close_requested:
                 self.state_changed.emit(SyncState.IDLE)
@@ -299,8 +337,8 @@ class SyncWorker(QObject):
         self.state_changed.emit(SyncState.CLOSED)
         logger.info("SyncWorker closed cleanly")
 
-    def shutdown_loop(self) -> None:
-        """Synchronously stop event loop thread if already idle."""
+    def shutdown_loop(self, timeout: float = 2.0) -> None:
+        """Synchronously stop event loop thread if caller is external."""
         self.request_close()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+        if self._thread and self._thread.is_alive() and threading.current_thread() != self._thread:
+            self._thread.join(timeout=timeout)

@@ -237,3 +237,81 @@ def test_failed_startup_allows_retry(mock_discover, qtbot, test_prefs) -> None:
     worker.stop_sync()
     qtbot.waitUntil(lambda: worker.state == SyncState.IDLE, timeout=4000)
     worker.request_close()
+
+
+@patch("src.ui.workers.sync_worker.discover_devices")
+def test_actual_thread_termination_on_close(mock_discover, qtbot, test_prefs) -> None:
+    """Gap 2: Verifies actual thread termination, not merely the transition to SyncState.CLOSED."""
+    mock_discover.return_value = []
+    window = MainWindow(prefs_manager=test_prefs)
+    qtbot.addWidget(window)
+
+    thread = window.worker.thread
+    assert thread is not None
+    assert thread.is_alive(), "Worker loop thread should be running while window is active."
+
+    # Close window cleanly
+    window.close()
+
+    # The background thread must physically terminate (is_alive() is False)
+    qtbot.waitUntil(lambda: not thread.is_alive(), timeout=4000)
+    assert not thread.is_alive(), "Worker loop thread remained alive after window close!"
+
+
+@patch("src.ui.workers.sync_worker.discover_devices")
+def test_repeated_start_stop_cycles(mock_discover, qtbot, test_prefs) -> None:
+    """Gap 2: Repeated Start/Stop cycles work reliably without hanging or thread starvation."""
+    mock_discover.return_value = []
+    window = MainWindow(prefs_manager=test_prefs)
+    qtbot.addWidget(window)
+
+    settings = EffectSettings()
+
+    for cycle in range(3):
+        started = window.worker.start_sync(
+            bulb_ip=None,
+            audio_device_index=None,
+            effect_name="spectrum",
+            settings=settings,
+            dry_run=True,
+        )
+        assert started is True, f"Start failed on cycle {cycle + 1}"
+        qtbot.waitUntil(lambda: window.worker.state == SyncState.RUNNING, timeout=4000)
+
+        window.worker.stop_sync()
+        qtbot.waitUntil(lambda: window.worker.state == SyncState.IDLE, timeout=4000)
+        assert window.worker.state == SyncState.IDLE
+
+    window.close()
+    qtbot.waitUntil(lambda: not window.worker.thread.is_alive(), timeout=4000)
+
+
+@patch("src.ui.workers.sync_worker.discover_devices")
+def test_accurate_restoration_reporting(mock_discover, qtbot, test_prefs) -> None:
+    """Gap 3: Accurate restoration results (SUCCESS, SKIPPED, UNAVAILABLE, FAILED) displayed in GUI."""
+    mock_discover.return_value = []
+    window = MainWindow(prefs_manager=test_prefs)
+    qtbot.addWidget(window)
+
+    settings = EffectSettings()
+
+    # Test 1: Dry run restoration result is SKIPPED
+    window.worker.start_sync(
+        bulb_ip=None,
+        audio_device_index=None,
+        effect_name="spectrum",
+        settings=settings,
+        restore_state=True,
+        dry_run=True,
+    )
+    qtbot.waitUntil(lambda: window.worker.state == SyncState.RUNNING, timeout=4000)
+    window.worker.stop_sync()
+    qtbot.waitUntil(lambda: window.worker.state == SyncState.IDLE, timeout=4000)
+    report = window.worker.last_restoration_report
+    assert report is not None
+    from src.sync.state import RestorationResult
+    assert report.result == RestorationResult.SKIPPED
+    qtbot.waitUntil(lambda: "skipped" in window.statusBar.currentMessage().lower(), timeout=4000)
+
+    window.close()
+    qtbot.waitUntil(lambda: not window.worker.thread.is_alive(), timeout=4000)
