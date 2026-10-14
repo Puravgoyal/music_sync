@@ -46,6 +46,7 @@ logs/
 *.log
 *.tmp
 tmp/
+smoke_test_result.json
 .env
 .env.*
 !.env.example
