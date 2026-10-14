@@ -37,10 +37,22 @@ class SpectrumRGBEffect(BaseMusicEffect):
                 timestamp=current_time,
             )
 
-        # Scale raw bands with sensitivity
-        b_raw = metrics.bass * self.settings.sensitivity
-        m_raw = metrics.mid * self.settings.sensitivity
-        t_raw = metrics.treble * self.settings.sensitivity
+        focus = getattr(metrics, "audio_focus", self.settings.audio_focus)
+        if focus == "rhythm" or getattr(focus, "value", None) == "rhythm":
+            # Suppress steady vocal band (mid) unless percussive attack detected
+            m_factor = 0.35 if not metrics.is_percussion else 0.85
+            b_raw = metrics.bass * self.settings.sensitivity
+            m_raw = metrics.mid * m_factor * self.settings.sensitivity
+            t_raw = metrics.treble * self.settings.sensitivity * 1.2
+        elif focus == "kick" or getattr(focus, "value", None) == "kick":
+            b_val = (metrics.kick_strength if metrics.is_kick else metrics.bass * 0.40) * 1.5
+            b_raw = b_val * self.settings.sensitivity
+            m_raw = metrics.mid * 0.25 * self.settings.sensitivity
+            t_raw = metrics.treble * 0.35 * self.settings.sensitivity
+        else:
+            b_raw = metrics.bass * self.settings.sensitivity
+            m_raw = metrics.mid * self.settings.sensitivity
+            t_raw = metrics.treble * self.settings.sensitivity
 
         # Proportional balance normalization: prevent one loud band from monopolizing
         sum_energy = b_raw + m_raw + t_raw

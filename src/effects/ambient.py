@@ -30,7 +30,14 @@ class AmbientFlowEffect(BaseMusicEffect):
         self._last_time = current_time
 
         # Baseline gentle hue drift
-        speed_factor = 1.0 + (metrics.loudness * self.settings.sensitivity * 1.5 if not metrics.is_silent else 0.0)
+        focus = getattr(metrics, "audio_focus", self.settings.audio_focus)
+        loudness_val = metrics.loudness
+        if (focus == "rhythm" or getattr(focus, "value", None) == "rhythm") and not metrics.is_percussion:
+            loudness_val *= 0.5
+        elif (focus == "kick" or getattr(focus, "value", None) == "kick") and not metrics.is_kick:
+            loudness_val *= 0.4
+
+        speed_factor = 1.0 + (loudness_val * self.settings.sensitivity * 1.5 if not metrics.is_silent else 0.0)
         self._current_hue = (self._current_hue + self._drift_rate * speed_factor * dt) % 1.0
 
         if metrics.is_silent:

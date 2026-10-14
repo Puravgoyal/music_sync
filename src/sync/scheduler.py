@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class BeatEvent:
+    """Latency-aware preserved beat transient event."""
+
+    timestamp: float
+    state: LightingState
+    intensity: float = 0.0
+
+
+@dataclass
 class SchedulerMetrics:
     """Live telemetry metrics for the bulb command scheduler."""
 
@@ -33,6 +42,9 @@ class SchedulerMetrics:
     applied_state: Optional[LightingState] = None
     is_dry_run: bool = False
     rate_hz: float = 4.0
+    adaptive_rate: bool = False
+    p95_duration_ms: float = 0.0
+    consecutive_successes: int = 0
 
 
 class BulbCommandScheduler:
@@ -41,10 +53,11 @@ class BulbCommandScheduler:
     Key capabilities:
     - Strictly limits outbound UDP transmission rate (1.0 - 10.0 Hz).
     - Guarantees non-overlapping commands using an execution lock.
-    - Coalesces pending commands to always dispatch the latest target state.
+    - Preserves fast beat-events between rate-limited ticks without unbounded queueing.
+    - Configurable Adaptive Update Rate: steps up when link latency is low and stable,
+      steps down immediately on packet loss or high round-trip latency.
     - Deadband suppression: skips transmission when RGB and brightness deltas
       are below perceptual thresholds compared to currently applied bulb state.
-    - Adaptive backoff during network dropped packets / timeouts.
     - Thread-safe state submission from audio callbacks.
     - Fully functional dry-run mode for simulation and testing.
     """
@@ -57,6 +70,10 @@ class BulbCommandScheduler:
         brightness_threshold: int = 4,
         command_timeout: float = 1.2,
         dry_run: bool = False,
+        adaptive_rate: bool = False,
+        min_rate_hz: float = 3.5,
+        max_rate_hz: float = 8.0,
+        max_beat_age_s: float = 0.18,
     ) -> None:
         if not (1.0 <= rate_hz <= 10.0):
             raise ValueError(f"Rate must be between 1.0 and 10.0 Hz, got {rate_hz}")
@@ -67,8 +84,13 @@ class BulbCommandScheduler:
         self.brightness_threshold = brightness_threshold
         self.command_timeout = command_timeout
         self.dry_run = dry_run
+        self.adaptive_rate = adaptive_rate
+        self.min_rate_hz = float(min_rate_hz)
+        self.max_rate_hz = float(max_rate_hz)
+        self.max_beat_age_s = float(max_beat_age_s)
 
         self._pending_state: Optional[LightingState] = None
+        self._pending_beat: Optional[BeatEvent] = None
         self._applied_state: Optional[LightingState] = None
         self._state_lock = threading.Lock()
         self._send_lock = asyncio.Lock()
@@ -77,11 +99,13 @@ class BulbCommandScheduler:
         self._worker_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # Telemetry
+        # Telemetry & performance
         self._commands_sent = 0
         self._commands_failed = 0
         self._consecutive_failures = 0
+        self._consecutive_successes = 0
         self._last_duration_ms = 0.0
+        self._p95_duration_ms = 0.0
         self._duration_history: Deque[float] = deque(maxlen=20)
         self._timestamp_history: Deque[float] = deque(maxlen=30)
 
@@ -103,13 +127,27 @@ class BulbCommandScheduler:
     def applied_state(self) -> Optional[LightingState]:
         return self._applied_state
 
-    def submit(self, state: LightingState) -> None:
+    def submit(
+        self,
+        state: LightingState,
+        is_beat: bool = False,
+        beat_intensity: float = 0.0,
+    ) -> None:
         """Submit a new target lighting state. Thread-safe and non-blocking.
 
-        Always overwrites any unhandled pending state with the newest state.
+        If is_beat is True, preserves the beat event so fast audio attacks
+        are not overwritten by subsequent decay frames between network dispatches.
         """
+        now = time.perf_counter()
         with self._state_lock:
             self._pending_state = state
+            if is_beat:
+                if (
+                    self._pending_beat is None
+                    or (now - self._pending_beat.timestamp > self.max_beat_age_s)
+                    or beat_intensity >= self._pending_beat.intensity
+                ):
+                    self._pending_beat = BeatEvent(timestamp=now, state=state, intensity=beat_intensity)
 
     async def start(self) -> None:
         """Start the rate-limited command dispatch worker loop."""
@@ -119,15 +157,17 @@ class BulbCommandScheduler:
         self._loop = asyncio.get_running_loop()
         self._worker_task = asyncio.create_task(self._worker_loop())
         logger.info(
-            "BulbCommandScheduler started (Rate: %.1f Hz, DryRun: %s)",
+            "BulbCommandScheduler started (Rate: %.1f Hz, Adaptive: %s, DryRun: %s)",
             self._rate_hz,
+            self.adaptive_rate,
             self.dry_run,
         )
 
     def clear(self) -> None:
-        """Atomically discard any queued pending state."""
+        """Atomically discard any queued pending state or beat events."""
         with self._state_lock:
             self._pending_state = None
+            self._pending_beat = None
 
     async def stop(self) -> None:
         """Gracefully stop the scheduler worker loop."""
@@ -143,6 +183,7 @@ class BulbCommandScheduler:
             self._worker_task = None
         with self._state_lock:
             self._pending_state = None
+            self._pending_beat = None
         logger.info("BulbCommandScheduler stopped cleanly")
 
     async def _worker_loop(self) -> None:
@@ -171,9 +212,18 @@ class BulbCommandScheduler:
                 break
 
     async def _process_tick(self) -> None:
-        """Process a single rate-limited dispatch tick."""
+        """Process a single rate-limited dispatch tick with beat preservation."""
+        now = time.perf_counter()
+        target: Optional[LightingState] = None
         with self._state_lock:
-            target = self._pending_state
+            # Check for fresh preserved beat event first
+            if self._pending_beat is not None:
+                if (now - self._pending_beat.timestamp) <= self.max_beat_age_s:
+                    target = self._pending_beat.state
+                self._pending_beat = None
+
+            if target is None:
+                target = self._pending_state
             self._pending_state = None
 
         if target is None:
@@ -198,13 +248,19 @@ class BulbCommandScheduler:
                 self._applied_state = target
                 self._commands_sent += 1
                 self._consecutive_failures = 0
+                self._consecutive_successes += 1
                 self._record_telemetry(duration_ms)
+                if self.adaptive_rate:
+                    self._adapt_rate_on_success()
                 logger.debug("[DRY-RUN] Dispatched state: %s (%.1f ms)", target, duration_ms)
                 return
 
             if self.controller is None or not self.controller.is_connected:
                 self._commands_failed += 1
                 self._consecutive_failures += 1
+                self._consecutive_successes = 0
+                if self.adaptive_rate:
+                    self._adapt_rate_on_failure()
                 logger.warning("Scheduler cannot dispatch: WiZ controller not connected")
                 return
 
@@ -221,7 +277,10 @@ class BulbCommandScheduler:
                 self._applied_state = target
                 self._commands_sent += 1
                 self._consecutive_failures = 0
+                self._consecutive_successes += 1
                 self._record_telemetry(duration_ms)
+                if self.adaptive_rate:
+                    self._adapt_rate_on_success()
                 logger.debug(
                     "Dispatched to bulb %s: %s (%.1f ms)",
                     self.controller.ip,
@@ -232,7 +291,10 @@ class BulbCommandScheduler:
                 duration_ms = (time.perf_counter() - t0) * 1000.0
                 self._commands_failed += 1
                 self._consecutive_failures += 1
+                self._consecutive_successes = 0
                 self._last_duration_ms = duration_ms
+                if self.adaptive_rate:
+                    self._adapt_rate_on_failure()
                 logger.warning(
                     "WiZ dispatch failed (%d consecutive): %s (%.1f ms)",
                     self._consecutive_failures,
@@ -246,6 +308,37 @@ class BulbCommandScheduler:
         self._last_duration_ms = duration_ms
         self._duration_history.append(duration_ms)
         self._timestamp_history.append(now)
+
+        if len(self._duration_history) >= 5:
+            sorted_durations = sorted(self._duration_history)
+            idx = int(0.95 * len(sorted_durations))
+            self._p95_duration_ms = sorted_durations[min(idx, len(sorted_durations) - 1)]
+        else:
+            self._p95_duration_ms = duration_ms
+
+    def _adapt_rate_on_success(self) -> None:
+        """Evaluate link conditions and step up or step down rate in adaptive mode."""
+        if self._consecutive_successes >= 10 and len(self._duration_history) >= 8:
+            if self._p95_duration_ms < 55.0 and self._rate_hz < self.max_rate_hz:
+                new_rate = min(self.max_rate_hz, round(self._rate_hz + 0.5, 1))
+                if new_rate != self._rate_hz:
+                    logger.info("Adaptive rate stepped UP: %.1f Hz -> %.1f Hz (p95: %.1f ms)", self._rate_hz, new_rate, self._p95_duration_ms)
+                    self._rate_hz = new_rate
+                    self._consecutive_successes = 0
+            elif self._p95_duration_ms > 110.0 and self._rate_hz > self.min_rate_hz:
+                new_rate = max(self.min_rate_hz, round(self._rate_hz - 0.5, 1))
+                if new_rate != self._rate_hz:
+                    logger.info("Adaptive rate stepped DOWN due to latency: %.1f Hz -> %.1f Hz (p95: %.1f ms)", self._rate_hz, new_rate, self._p95_duration_ms)
+                    self._rate_hz = new_rate
+                    self._consecutive_successes = 0
+
+    def _adapt_rate_on_failure(self) -> None:
+        """Immediately drop rate on transmission failure or timeout."""
+        if self._rate_hz > self.min_rate_hz:
+            new_rate = max(self.min_rate_hz, round(self._rate_hz - 1.0, 1))
+            if new_rate != self._rate_hz:
+                logger.warning("Adaptive rate stepped DOWN due to failure: %.1f Hz -> %.1f Hz", self._rate_hz, new_rate)
+                self._rate_hz = new_rate
 
     def get_metrics(self) -> SchedulerMetrics:
         """Retrieve snapshot of scheduler metrics and performance."""
@@ -278,4 +371,7 @@ class BulbCommandScheduler:
             applied_state=self._applied_state,
             is_dry_run=self.dry_run,
             rate_hz=self._rate_hz,
+            adaptive_rate=self.adaptive_rate,
+            p95_duration_ms=self._p95_duration_ms,
+            consecutive_successes=self._consecutive_successes,
         )

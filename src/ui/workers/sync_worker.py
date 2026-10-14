@@ -9,6 +9,7 @@ from typing import Any, List, Optional, Tuple
 from PySide6.QtCore import QObject, Signal
 
 from src.audio.analyzer import AudioMetrics
+from src.audio.beat_detector import AudioFocus
 from src.audio.capture import CaptureStats
 from src.effects import EffectSettings
 from src.sync.engine import MusicSyncEngine
@@ -58,6 +59,8 @@ class SyncWorker(QObject):
         self._stop_requested = False
         self._close_requested = False
         self._last_restoration_report: Optional[RestorationReport] = None
+        self.last_test_success: Optional[bool] = None
+        self.last_test_message: str = ""
 
         self._start_event_loop()
 
@@ -131,6 +134,9 @@ class SyncWorker(QObject):
         if not self._loop or self._state == SyncState.CLOSED:
             return
 
+        self.last_test_success = None
+        self.last_test_message = ""
+
         async def _do_test() -> None:
             controller: Optional[WizBulbController] = None
             try:
@@ -141,9 +147,14 @@ class SyncWorker(QObject):
                 model = cap.model if cap else "ESP25 WiZ Bulb"
                 fw = cap.firmware_version if cap else "Unknown"
                 msg = f"Connected to {model} (FW: {fw}, MAC: {controller.mac or 'N/A'}) - Currently {state.is_on and 'ON' or 'OFF'}"
+                self.last_test_success = True
+                self.last_test_message = msg
                 self.bulb_tested.emit(True, msg)
             except Exception as exc:
-                self.bulb_tested.emit(False, f"Connection failed to {ip}: {exc}")
+                err_msg = f"Connection failed to {ip}: {exc}"
+                self.last_test_success = False
+                self.last_test_message = err_msg
+                self.bulb_tested.emit(False, err_msg)
             finally:
                 if controller:
                     try:
@@ -161,6 +172,8 @@ class SyncWorker(QObject):
         settings: EffectSettings,
         restore_state: bool = True,
         dry_run: bool = False,
+        audio_focus: str = "full",
+        adaptive_rate: bool = False,
     ) -> bool:
         """Start music synchronization on the background asyncio engine.
 
@@ -192,6 +205,11 @@ class SyncWorker(QObject):
                             self._finalize_closed()
                         return
 
+                try:
+                    af = AudioFocus(audio_focus)
+                except Exception:
+                    af = AudioFocus.FULL_MUSIC
+
                 engine = MusicSyncEngine(
                     bulb_ip=bulb_ip,
                     audio_device_index=audio_device_index,
@@ -200,6 +218,8 @@ class SyncWorker(QObject):
                     update_rate_hz=settings.update_rate_hz,
                     dry_run=dry_run,
                     restore_state=restore_state,
+                    audio_focus=af,
+                    adaptive_rate=adaptive_rate,
                 )
                 self._engine = engine
                 await engine.start()
@@ -292,6 +312,20 @@ class SyncWorker(QObject):
         """Update effect settings dynamically. Thread-safe."""
         if self._engine and self.is_syncing:
             self._engine.set_settings(settings)
+
+    def set_audio_focus(self, focus: str) -> None:
+        """Switch audio focus mode dynamically. Thread-safe."""
+        if self._engine:
+            try:
+                af = AudioFocus(focus)
+                self._engine.set_audio_focus(af)
+            except Exception as exc:
+                logger.debug("Error updating audio focus in worker: %s", exc)
+
+    def set_adaptive_rate(self, enabled: bool) -> None:
+        """Toggle adaptive update rate dynamically. Thread-safe."""
+        if self._engine:
+            self._engine.set_adaptive_rate(enabled)
 
     def get_telemetry_snapshot(
         self,

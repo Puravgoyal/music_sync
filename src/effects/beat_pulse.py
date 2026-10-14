@@ -28,9 +28,20 @@ class BeatPulseEffect(BaseMusicEffect):
         dt = max(0.001, current_time - self._last_time)
         self._last_time = current_time
 
+        focus = getattr(metrics, "audio_focus", self.settings.audio_focus)
+        if focus == "rhythm" or getattr(focus, "value", None) == "rhythm":
+            is_beat = metrics.is_percussion
+            beat_str = metrics.percussion_strength
+        elif focus == "kick" or getattr(focus, "value", None) == "kick":
+            is_beat = metrics.is_kick
+            beat_str = metrics.kick_strength
+        else:
+            is_beat = metrics.is_onset
+            beat_str = metrics.onset_strength
+
         # If an onset is triggered, inject pulse energy scaled by onset strength
-        if metrics.is_onset and not metrics.is_silent:
-            boost = min(1.0, metrics.onset_strength * self.settings.beat_strength)
+        if is_beat and not metrics.is_silent:
+            boost = min(1.0, beat_str * self.settings.beat_strength)
             # Additive kick with saturation limit to prevent excessive strobing
             self._pulse_energy = min(1.0, self._pulse_energy + boost * 0.75)
 
@@ -38,17 +49,29 @@ class BeatPulseEffect(BaseMusicEffect):
         decay = min(1.0, self.settings.release_speed * dt * 30.0)
         self._pulse_energy = max(0.0, self._pulse_energy * (1.0 - decay))
 
-        # Base brightness influenced by loudness, plus pulse boost
-        base_b = float(self.clamp_brightness(metrics.loudness * 0.5 * self.settings.sensitivity))
+        # Base brightness:
+        # In Full Music mode, loudness modulates baseline.
+        # In Rhythm/Kick modes, baseline stays firmly at min_brightness during vocals
+        # to eliminate vocal pumping, gently rising only on sustained rhythm energy.
+        if focus == "full" or getattr(focus, "value", None) == "full":
+            base_b = float(self.clamp_brightness(metrics.loudness * 0.5 * self.settings.sensitivity))
+        else:
+            base_b = float(self.settings.min_brightness)
+            if (focus == "rhythm" or getattr(focus, "value", None) == "rhythm") and metrics.is_percussion:
+                base_b += (self.settings.max_brightness - self.settings.min_brightness) * 0.15 * metrics.percussion_strength
+            elif (focus == "kick" or getattr(focus, "value", None) == "kick") and metrics.is_kick:
+                base_b += (self.settings.max_brightness - self.settings.min_brightness) * 0.20 * metrics.kick_strength
+
         pulse_boost = self._pulse_energy * (self.settings.max_brightness - base_b)
         target_b = min(float(self.settings.max_brightness), base_b + pulse_boost)
 
-        # Smooth brightness envelope
+        # Smooth brightness envelope (fast attack, smooth decay)
         if target_b > self._current_brightness:
             b_rate = min(1.0, self.settings.attack_speed * dt * 50.0)
         else:
             b_rate = min(1.0, self.settings.release_speed * dt * 25.0)
         self._current_brightness += b_rate * (target_b - self._current_brightness)
+        self._current_brightness = max(float(self.settings.min_brightness), min(float(self.settings.max_brightness), self._current_brightness))
 
         # Blend color from base towards pulse highlight during hits
         blend_factor = min(0.65, self._pulse_energy * 0.65)

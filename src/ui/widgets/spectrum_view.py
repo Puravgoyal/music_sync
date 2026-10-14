@@ -96,17 +96,37 @@ class SpectrumView(QGroupBox):
         self.treble_bar.setValue(min(100, int(metrics.treble * 100)))
         self.vol_bar.setValue(min(100, int(metrics.loudness * 100)))
 
-        if metrics.is_onset and not metrics.is_silent:
-            self.beat_badge.setText("⚡ BEAT DETECTED!")
-            self.beat_badge.setStyleSheet(
-                "background-color: #f59e0b; color: #000000; border: 1px solid #fbbf24; "
-                "border-radius: 4px; padding: 4px 14px; font-weight: 800; font-size: 11px;"
-            )
-        else:
-            self._set_beat_inactive()
+        focus = getattr(metrics, "audio_focus", "full")
+        focus_val = getattr(focus, "value", str(focus))
 
-    def _set_beat_inactive(self) -> None:
-        self.beat_badge.setText("Rhythm Tracking")
+        if not metrics.is_silent:
+            if focus_val == "kick" and getattr(metrics, "is_kick", False):
+                self.beat_badge.setText("⚡ KICK HIT!")
+                self.beat_badge.setStyleSheet(
+                    "background-color: #ef4444; color: #ffffff; border: 1px solid #f87171; "
+                    "border-radius: 4px; padding: 4px 14px; font-weight: 800; font-size: 11px;"
+                )
+                return
+            elif focus_val == "rhythm" and getattr(metrics, "is_percussion", False):
+                self.beat_badge.setText("⚡ PERCUSSION HIT!")
+                self.beat_badge.setStyleSheet(
+                    "background-color: #8b5cf6; color: #ffffff; border: 1px solid #a78bfa; "
+                    "border-radius: 4px; padding: 4px 14px; font-weight: 800; font-size: 11px;"
+                )
+                return
+            elif metrics.is_onset:
+                self.beat_badge.setText("⚡ BEAT DETECTED!")
+                self.beat_badge.setStyleSheet(
+                    "background-color: #f59e0b; color: #000000; border: 1px solid #fbbf24; "
+                    "border-radius: 4px; padding: 4px 14px; font-weight: 800; font-size: 11px;"
+                )
+                return
+
+        self._set_beat_inactive(focus_val)
+
+    def _set_beat_inactive(self, focus_name: str = "full") -> None:
+        title = f"Tracking ({focus_name.capitalize()})" if focus_name != "full" else "Rhythm Tracking"
+        self.beat_badge.setText(title)
         self.beat_badge.setStyleSheet(
             "background-color: #18191d; color: #64748b; border: 1px solid #28292e; "
             "border-radius: 4px; padding: 4px 14px; font-weight: 600; font-size: 11px;"

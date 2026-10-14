@@ -4,6 +4,7 @@ from typing import Dict, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QGroupBox,
@@ -22,6 +23,8 @@ class EffectsPanel(QGroupBox):
 
     effect_changed = Signal(str)  # effect_name
     settings_changed = Signal(object)  # EffectSettings
+    audio_focus_changed = Signal(str)  # focus_mode ("full", "rhythm", "kick")
+    adaptive_rate_changed = Signal(bool)  # adaptive rate enabled
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__("Music Reactive Effect & Tuning", parent)
@@ -46,6 +49,22 @@ class EffectsPanel(QGroupBox):
         mode_layout.addWidget(mode_label)
         mode_layout.addWidget(self.mode_combo, stretch=2)
         layout.addLayout(mode_layout)
+
+        # Audio Focus Selector
+        focus_layout = QHBoxLayout()
+        focus_label = QLabel("Audio Focus:")
+        focus_label.setStyleSheet("font-weight: 600; color: #f8fafc;")
+
+        self.focus_combo = QComboBox()
+        self.focus_combo.setMinimumHeight(32)
+        self.focus_combo.addItem("Full Music (All Bands & Vocals)", "full")
+        self.focus_combo.addItem("Rhythm Focus (Percussion / Vocal Suppression)", "rhythm")
+        self.focus_combo.addItem("Kick Focus (40-180 Hz Kick Transients)", "kick")
+        self.focus_combo.currentIndexChanged.connect(self._on_focus_changed)
+
+        focus_layout.addWidget(focus_label)
+        focus_layout.addWidget(self.focus_combo, stretch=2)
+        layout.addLayout(focus_layout)
 
         # Effect Description Box
         self.desc_label = QLabel()
@@ -77,6 +96,14 @@ class EffectsPanel(QGroupBox):
         self.rate_slider, self.rate_val = self._create_slider(grid, 7, "Bulb Update Rate:", 10, 100, 40, " Hz")
 
         layout.addLayout(grid)
+
+        # Adaptive Rate Toggle
+        self.adaptive_chk = QCheckBox("Adaptive Update Rate (Auto-step 3.5 - 8.0 Hz on network latency)")
+        self.adaptive_chk.setStyleSheet("color: #cbd5e1; font-size: 11px;")
+        self.adaptive_chk.setChecked(False)
+        self.adaptive_chk.toggled.connect(self._on_adaptive_toggled)
+        layout.addWidget(self.adaptive_chk)
+
         self._update_description()
 
     def _create_slider(
@@ -126,6 +153,14 @@ class EffectsPanel(QGroupBox):
         if eff_id:
             self.effect_changed.emit(eff_id)
 
+    def _on_focus_changed(self) -> None:
+        focus = self.get_audio_focus()
+        self.audio_focus_changed.emit(focus)
+        self._notify_settings_changed()
+
+    def _on_adaptive_toggled(self, checked: bool) -> None:
+        self.adaptive_rate_changed.emit(checked)
+
     def _update_description(self) -> None:
         eff_id = self.mode_combo.currentData()
         for eff in self._effects_data:
@@ -143,6 +178,22 @@ class EffectsPanel(QGroupBox):
                 self.mode_combo.setCurrentIndex(idx)
                 break
 
+    def get_audio_focus(self) -> str:
+        data = self.focus_combo.currentData()
+        return str(data) if data else "full"
+
+    def set_audio_focus(self, focus_name: str) -> None:
+        for idx in range(self.focus_combo.count()):
+            if self.focus_combo.itemData(idx) == focus_name:
+                self.focus_combo.setCurrentIndex(idx)
+                break
+
+    def get_adaptive_rate(self) -> bool:
+        return self.adaptive_chk.isChecked()
+
+    def set_adaptive_rate(self, enabled: bool) -> None:
+        self.adaptive_chk.setChecked(enabled)
+
     def get_settings(self) -> EffectSettings:
         min_b = self.min_b_slider.value()
         max_b = self.max_b_slider.value()
@@ -158,6 +209,7 @@ class EffectsPanel(QGroupBox):
             release_speed=self.release_slider.value() / 100.0,
             beat_strength=self.beat_slider.value() / 100.0,
             update_rate_hz=self.rate_slider.value() / 10.0,
+            audio_focus=self.get_audio_focus(),
         )
 
     def set_settings(self, settings: EffectSettings) -> None:
@@ -169,6 +221,9 @@ class EffectsPanel(QGroupBox):
         self.release_slider.setValue(int(settings.release_speed * 100))
         self.beat_slider.setValue(int(settings.beat_strength * 100))
         self.rate_slider.setValue(int(settings.update_rate_hz * 10))
+        if getattr(settings, "audio_focus", None) is not None:
+            val = getattr(settings.audio_focus, "value", str(settings.audio_focus))
+            self.set_audio_focus(val)
 
     def _notify_settings_changed(self) -> None:
         try:

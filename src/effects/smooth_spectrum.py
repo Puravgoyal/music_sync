@@ -36,11 +36,20 @@ class SmoothSpectrumEffect(BaseMusicEffect):
             decay = min(1.0, self.settings.release_speed * dt * 20.0)
             self._current_brightness += decay * (target_b - self._current_brightness)
         else:
-            # Calculate spectral balance / centroid estimate [0.0 - 1.0]
-            # Bass gives warm/red (0.0), Mid gives green/cyan (0.35), Treble gives blue/violet (0.7)
-            b = metrics.bass * self.settings.sensitivity
-            m = metrics.mid * self.settings.sensitivity
-            t = metrics.treble * self.settings.sensitivity
+            focus = getattr(metrics, "audio_focus", self.settings.audio_focus)
+            if focus == "rhythm" or getattr(focus, "value", None) == "rhythm":
+                m_factor = 0.40 if not metrics.is_percussion else 0.80
+                b = metrics.bass * self.settings.sensitivity
+                m = metrics.mid * m_factor * self.settings.sensitivity
+                t = metrics.treble * self.settings.sensitivity * 1.15
+            elif focus == "kick" or getattr(focus, "value", None) == "kick":
+                b = (metrics.kick_strength if metrics.is_kick else metrics.bass * 0.40) * self.settings.sensitivity * 1.4
+                m = metrics.mid * 0.25 * self.settings.sensitivity
+                t = metrics.treble * 0.35 * self.settings.sensitivity
+            else:
+                b = metrics.bass * self.settings.sensitivity
+                m = metrics.mid * self.settings.sensitivity
+                t = metrics.treble * self.settings.sensitivity
             total = b + m + t
 
             if total > 1e-4:

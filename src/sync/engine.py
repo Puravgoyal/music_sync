@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 from src.audio.analyzer import AudioMetrics
+from src.audio.beat_detector import AudioFocus
 from src.audio.capture import AudioCapture, CaptureStats
 from src.audio.devices import AudioDevice, get_default_output_device, get_device_by_index
 from src.effects import BaseMusicEffect, EffectSettings, get_effect
@@ -41,6 +42,8 @@ class MusicSyncEngine:
         update_rate_hz: float = 4.0,
         dry_run: bool = False,
         restore_state: bool = True,
+        audio_focus: AudioFocus = AudioFocus.FULL_MUSIC,
+        adaptive_rate: bool = False,
     ) -> None:
         self.bulb_ip = bulb_ip
         self.audio_device_index = audio_device_index
@@ -49,6 +52,9 @@ class MusicSyncEngine:
         self.update_rate_hz = update_rate_hz
         self.dry_run = dry_run
         self.restore_state = restore_state
+        self.audio_focus = audio_focus
+        self.adaptive_rate = adaptive_rate
+        self.settings.audio_focus = self.audio_focus
 
         # Thread synchronization locks
         self._effect_lock = threading.Lock()
@@ -110,9 +116,29 @@ class MusicSyncEngine:
         with self._effect_lock:
             self.settings = settings
             self._effect.settings = settings
+        if getattr(settings, "audio_focus", None) is not None:
+            self.set_audio_focus(settings.audio_focus)
         if self._scheduler:
             self._scheduler.rate_hz = settings.update_rate_hz
         logger.info("Updated effect settings: sensitivity=%.2f, max_b=%d", settings.sensitivity, settings.max_brightness)
+
+    def set_audio_focus(self, focus: AudioFocus) -> None:
+        """Switch audio focus mode (full, rhythm, kick) on the fly."""
+        self.audio_focus = focus
+        if self._capture:
+            self._capture.audio_focus = focus
+        with self._effect_lock:
+            self.settings.audio_focus = focus
+            if self._effect:
+                self._effect.settings.audio_focus = focus
+        logger.info("Switched active audio focus mode to: %s", getattr(focus, "value", focus))
+
+    def set_adaptive_rate(self, enabled: bool) -> None:
+        """Toggle adaptive update rate mode on the fly."""
+        self.adaptive_rate = enabled
+        if self._scheduler:
+            self._scheduler.adaptive_rate = enabled
+        logger.info("Adaptive update rate set to: %s", enabled)
 
     async def start(self) -> None:
         """Start the synchronization engine with transactional startup and rollback on error."""
@@ -153,6 +179,7 @@ class MusicSyncEngine:
                     controller=self._controller,
                     rate_hz=self.update_rate_hz,
                     dry_run=self.dry_run,
+                    adaptive_rate=self.adaptive_rate,
                 )
                 await self._scheduler.start()
                 stages_completed.append("scheduler")
@@ -171,6 +198,7 @@ class MusicSyncEngine:
                     device=self._selected_device,
                     frames_per_buffer=1024,
                     on_metrics=self._handle_audio_metrics,
+                    audio_focus=self.audio_focus,
                 )
                 self._capture.start()
                 stages_completed.append("capture")
@@ -230,7 +258,17 @@ class MusicSyncEngine:
                 self._last_target_state = target_state
 
             if self._scheduler:
-                self._scheduler.submit(target_state)
+                focus = getattr(metrics, "audio_focus", self.audio_focus)
+                if focus == "rhythm" or getattr(focus, "value", None) == "rhythm":
+                    is_beat = metrics.is_percussion
+                    beat_str = metrics.percussion_strength
+                elif focus == "kick" or getattr(focus, "value", None) == "kick":
+                    is_beat = metrics.is_kick
+                    beat_str = metrics.kick_strength
+                else:
+                    is_beat = metrics.is_onset
+                    beat_str = metrics.onset_strength
+                self._scheduler.submit(target_state, is_beat=is_beat, beat_intensity=beat_str)
         except Exception as exc:
             logger.error("Error processing audio frame in effect: %s", exc, exc_info=True)
 
@@ -327,4 +365,7 @@ class MusicSyncEngine:
             last_command_duration_ms=sched_metrics.last_command_duration_ms if sched_metrics else 0.0,
             is_dry_run=self.dry_run,
             pending_states_count=1 if (sched_metrics and sched_metrics.pending_state) else 0,
+            audio_focus=getattr(self.audio_focus, "value", str(self.audio_focus)),
+            adaptive_rate=sched_metrics.adaptive_rate if sched_metrics else self.adaptive_rate,
+            p95_duration_ms=sched_metrics.p95_duration_ms if sched_metrics else 0.0,
         )

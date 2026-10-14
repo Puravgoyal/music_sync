@@ -165,15 +165,16 @@ class StatusPanel(QGroupBox):
 
         # Target swatch
         tgt = status.target_state
-        r, g, b = tgt.rgb
-        self.tgt_swatch.setStyleSheet(
-            f"background-color: rgb({r}, {g}, {b}); border: 1px solid #4b5563; border-radius: 6px;"
-        )
-        self.tgt_text.setText(f"RGB({r:3d}, {g:3d}, {b:3d}) @ {tgt.brightness}/255")
+        if tgt and hasattr(tgt, "rgb") and hasattr(tgt.rgb, "__len__") and len(tgt.rgb) == 3:
+            r, g, b = tgt.rgb
+            self.tgt_swatch.setStyleSheet(
+                f"background-color: rgb({r}, {g}, {b}); border: 1px solid #4b5563; border-radius: 6px;"
+            )
+            self.tgt_text.setText(f"RGB({r:3d}, {g:3d}, {b:3d}) @ {tgt.brightness}/255")
 
         # Applied swatch
         app = status.applied_state
-        if app:
+        if app and hasattr(app, "rgb") and hasattr(app.rgb, "__len__") and len(app.rgb) == 3:
             ar, ag, ab = app.rgb
             self.app_swatch.setStyleSheet(
                 f"background-color: rgb({ar}, {ag}, {ab}); border: 1px solid #4b5563; border-radius: 6px;"
@@ -182,8 +183,11 @@ class StatusPanel(QGroupBox):
 
         # Telemetry metrics
         dur = status.last_command_duration_ms
+        mode_str = " (Adaptive)" if getattr(status, "adaptive_rate", False) else ""
+        p95_dur = getattr(status, "p95_duration_ms", 0.0)
+        p95_str = f" (p95: {p95_dur:4.1f} ms)" if p95_dur > 0 else ""
         self.telemetry_label.setText(
-            f"Rate: {status.updates_per_second:4.1f} Hz | "
+            f"Rate: {status.updates_per_second:4.1f} Hz{mode_str} | "
             f"Commands: {status.commands_sent} sent, {status.commands_failed} failed | "
-            f"Latency: {dur:4.1f} ms"
+            f"Latency: {dur:4.1f} ms{p95_str}"
         )

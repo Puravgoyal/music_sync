@@ -6,10 +6,14 @@
   "main_window_created": true,
   "connection_tested": true,
   "sync_started": true,
+  "audio_frames_processed": 287,
+  "commands_sent": 18,
   "effect_switched": true,
   "sync_stopped": true,
   "restoration_result": "Successfully restored",
-  "restoration_details": "Restored white state",
+  "restoration_details": "Restored rgb state",
+  "restoration_verified": true,
   "threads_terminated": true,
-  "error": null
+  "error": null,
+  "focus_mode": "rhythm"
 }

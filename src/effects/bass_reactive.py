@@ -17,7 +17,16 @@ class BassReactiveEffect(BaseMusicEffect):
         dt = max(0.001, current_time - self._last_time)
         self._last_time = current_time
 
-        bass_energy = min(1.0, metrics.bass * self.settings.sensitivity)
+        focus = getattr(metrics, "audio_focus", self.settings.audio_focus)
+        if focus == "kick" or getattr(focus, "value", None) == "kick":
+            # In kick focus, reject sustained bass notes and respond cleanly to punchy kick transients
+            kick_val = metrics.kick_strength if metrics.is_kick else (metrics.bass * 0.25)
+            bass_energy = min(1.0, kick_val * self.settings.sensitivity)
+        elif focus == "rhythm" or getattr(focus, "value", None) == "rhythm":
+            rhythm_val = max(metrics.bass * 0.5, metrics.percussion_strength if metrics.is_percussion else 0.0)
+            bass_energy = min(1.0, rhythm_val * self.settings.sensitivity)
+        else:
+            bass_energy = min(1.0, metrics.bass * self.settings.sensitivity)
 
         if metrics.is_silent or bass_energy < 0.02:
             target_b = float(self.settings.min_brightness)

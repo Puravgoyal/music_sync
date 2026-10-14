@@ -141,6 +141,8 @@ class MainWindow(QMainWindow):
         # Effects Panel signals
         self.effects_panel.effect_changed.connect(self._on_effect_changed)
         self.effects_panel.settings_changed.connect(self._on_settings_changed)
+        self.effects_panel.audio_focus_changed.connect(self._on_audio_focus_changed)
+        self.effects_panel.adaptive_rate_changed.connect(self._on_adaptive_rate_changed)
 
         # Status Panel signals
         self.status_panel.start_clicked.connect(self._on_start_sync)
@@ -169,6 +171,11 @@ class MainWindow(QMainWindow):
 
         # Effects and Sliders
         self.effects_panel.set_selected_effect(self.prefs.preferred_effect)
+        if getattr(self.prefs, "audio_focus", None):
+            self.effects_panel.set_audio_focus(self.prefs.audio_focus)
+        if hasattr(self.prefs, "adaptive_rate"):
+            self.effects_panel.set_adaptive_rate(self.prefs.adaptive_rate)
+
         settings = EffectSettings(
             sensitivity=self.prefs.sensitivity,
             min_brightness=self.prefs.min_brightness,
@@ -178,6 +185,7 @@ class MainWindow(QMainWindow):
             release_speed=self.prefs.release_speed,
             beat_strength=self.prefs.beat_strength,
             update_rate_hz=self.prefs.update_rate_hz,
+            audio_focus=self.prefs.audio_focus,
         )
         self.effects_panel.set_settings(settings)
 
@@ -201,6 +209,8 @@ class MainWindow(QMainWindow):
         self.prefs.release_speed = settings.release_speed
         self.prefs.beat_strength = settings.beat_strength
         self.prefs.update_rate_hz = settings.update_rate_hz
+        self.prefs.audio_focus = self.effects_panel.get_audio_focus()
+        self.prefs.adaptive_rate = self.effects_panel.get_adaptive_rate()
 
         self.prefs.restore_on_stop = self.status_panel.restore_chk.isChecked()
         self.prefs.dry_run = self.status_panel.dry_run_chk.isChecked()
@@ -234,6 +244,17 @@ class MainWindow(QMainWindow):
     def _on_settings_changed(self, settings: EffectSettings) -> None:
         self.worker.set_settings(settings)
 
+    def _on_audio_focus_changed(self, focus: str) -> None:
+        self.prefs.audio_focus = focus
+        self.worker.set_audio_focus(focus)
+        self.statusBar.showMessage(f"Audio focus changed to: {focus.capitalize()}", 3000)
+
+    def _on_adaptive_rate_changed(self, enabled: bool) -> None:
+        self.prefs.adaptive_rate = enabled
+        self.worker.set_adaptive_rate(enabled)
+        mode_str = "Enabled (Auto-tune based on latency)" if enabled else "Disabled (Fixed manual rate)"
+        self.statusBar.showMessage(f"Adaptive update rate {mode_str}", 3000)
+
     def _on_restore_toggled(self, checked: bool) -> None:
         self.prefs.restore_on_stop = checked
 
@@ -262,9 +283,11 @@ class MainWindow(QMainWindow):
         effect_name = self.effects_panel.get_selected_effect()
         settings = self.effects_panel.get_settings()
         restore_state = self.status_panel.restore_chk.isChecked()
+        audio_focus = self.effects_panel.get_audio_focus()
+        adaptive_rate = self.effects_panel.get_adaptive_rate()
 
         self.status_panel.set_busy_state("Connecting...", allow_cancel=True)
-        self.statusBar.showMessage(f"Starting music sync ({effect_name})...")
+        self.statusBar.showMessage(f"Starting music sync ({effect_name}, focus: {audio_focus})...")
 
         # Disable device and audio selection during active sync
         self.device_panel.set_controls_enabled(False)
@@ -277,6 +300,8 @@ class MainWindow(QMainWindow):
             settings=settings,
             restore_state=restore_state,
             dry_run=dry_run,
+            audio_focus=audio_focus,
+            adaptive_rate=adaptive_rate,
         )
 
     def _on_stop_sync(self) -> None:

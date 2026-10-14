@@ -29,6 +29,9 @@ class AppPreferences:
     restore_on_stop: bool = True
     dry_run: bool = False
     window_geometry: Optional[str] = None
+    audio_focus: str = "full"
+    adaptive_rate: bool = False
+    safe_max_rate_hz: float = 8.0
 
     def validate(self) -> None:
         """Validate and clamp settings to safe limits."""
@@ -44,6 +47,9 @@ class AppPreferences:
         self.update_rate_hz = max(1.0, min(10.0, float(self.update_rate_hz)))
         if self.preferred_effect not in ("spectrum", "beat", "bass", "smooth", "ambient"):
             self.preferred_effect = "spectrum"
+        if self.audio_focus not in ("full", "rhythm", "kick"):
+            self.audio_focus = "full"
+        self.safe_max_rate_hz = max(4.0, min(10.0, float(self.safe_max_rate_hz)))
 
 
 def get_preferences_path() -> Path:

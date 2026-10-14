@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from src.audio.analyzer import AudioMetrics
+from src.audio.beat_detector import AudioFocus
 from src.sync.state import LightingState
 
 
@@ -22,6 +23,7 @@ class EffectSettings:
     beat_strength: float = 1.0  # Multiplier for musical onset triggers [0.0, 2.0]
     color_smoothing: float = 0.30  # Exponential smoothing for RGB color transitions [0.0, 0.95]
     update_rate_hz: float = 4.0  # Target bulb command frequency [1.0, 10.0]
+    audio_focus: AudioFocus = AudioFocus.FULL_MUSIC  # Audio focus mode (full, rhythm, kick)
 
     def validate(self) -> None:
         """Validate parameter ranges and relationships."""

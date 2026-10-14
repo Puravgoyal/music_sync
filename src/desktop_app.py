@@ -1,17 +1,24 @@
-"""WiZ Music Sync — Desktop Application Entrypoint."""
-
+import asyncio
 import json
 import logging
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Optional
+
+# Ensure project root is in sys.path
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from src.sync.state import RestorationResult
 from src.ui.main_window import MainWindow
 from src.ui.workers.sync_worker import SyncState
+from src.wiz.controller import WizBulbController
 
 logger = logging.getLogger("wiz_music_sync")
 
@@ -135,10 +142,13 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
         "main_window_created": False,
         "connection_tested": False,
         "sync_started": False,
+        "audio_frames_processed": 0,
+        "commands_sent": 0,
         "effect_switched": False,
         "sync_stopped": False,
         "restoration_result": "NONE",
         "restoration_details": "",
+        "restoration_verified": False,
         "threads_terminated": False,
         "error": None,
     }
@@ -157,6 +167,16 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
         window = MainWindow()
         diagnostics["main_window_created"] = True
 
+        # Capture initial state for post-test restoration verification
+        async def _query_state(ip: str):
+            c = WizBulbController(ip)
+            await c.connect()
+            st = await c.get_state()
+            await c.disconnect()
+            return st
+
+        initial_state = asyncio.run(_query_state(target_ip))
+
         # Configure bulb IP
         window.device_panel.set_manual_ip(target_ip)
         window.show()
@@ -168,15 +188,43 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
         while time.perf_counter() - t_wait_test < 4.0:
             app.processEvents()
             time.sleep(0.05)
-            if "Connected" in window.device_panel.status_label.text() or "Successfully" in window.device_panel.status_label.text():
-                diagnostics["connection_tested"] = True
+            if window.worker.last_test_success is not None:
+                if window.worker.last_test_success is True:
+                    diagnostics["connection_tested"] = True
                 break
-        diagnostics["connection_tested"] = True
+        assert diagnostics["connection_tested"] is True, f"Bulb connection test failed or timed out: {window.worker.last_test_message}"
+
+        # Feed test audio pulses so loopback capture has active audio frames during test
+        stop_audio = threading.Event()
+        def _feed_test_audio():
+            try:
+                import pyaudiowpatch as pyaudio
+                import numpy as np
+                pa = pyaudio.PyAudio()
+                dev_info = pa.get_default_output_device_info()
+                rate = int(dev_info["defaultSampleRate"])
+                st = pa.open(format=pyaudio.paFloat32, channels=1, rate=rate, output=True)
+                t_tone = np.linspace(0, 0.08, int(rate * 0.08), endpoint=False)
+                tone_samples = (0.25 * np.sin(2 * np.pi * 65.0 * t_tone)).astype(np.float32)
+                while not stop_audio.is_set():
+                    st.write(tone_samples.tobytes())
+                    time.sleep(0.12)
+                st.stop_stream()
+                st.close()
+                pa.terminate()
+            except Exception as e:
+                logger.debug("Test audio playback finished: %s", e)
+
+        audio_th = threading.Thread(target=_feed_test_audio, daemon=True)
+        audio_th.start()
+
+        # Ensure initial effect is Spectrum RGB
+        window.effects_panel.set_selected_effect("spectrum")
 
         # Start sync
         window._on_start_sync()
         t_wait_start = time.perf_counter()
-        while time.perf_counter() - t_wait_start < 5.0:
+        while time.perf_counter() - t_wait_start < 8.0:
             app.processEvents()
             time.sleep(0.05)
             if window.worker.state == SyncState.RUNNING:
@@ -194,14 +242,38 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
 
         # Switch effect to "beat"
         window.effects_panel.set_selected_effect("beat")
-        diagnostics["effect_switched"] = True
+        t_wait_eff = time.perf_counter()
+        while time.perf_counter() - t_wait_eff < 3.0:
+            app.processEvents()
+            time.sleep(0.05)
+            engine = getattr(window.worker, "_engine", None)
+            if engine:
+                eff = getattr(engine, "current_effect", None)
+                if eff and getattr(eff, "name", "") == "Beat Pulse":
+                    diagnostics["effect_switched"] = True
+                    break
+        assert diagnostics["effect_switched"] is True, "Engine did not verify active effect changed to Beat Pulse"
+
+        # Switch focus to "rhythm"
+        window.effects_panel.set_audio_focus("rhythm")
+        diagnostics["focus_mode"] = window.effects_panel.get_audio_focus()
 
         t_run2 = time.perf_counter()
         while time.perf_counter() - t_run2 < half:
             app.processEvents()
             time.sleep(0.05)
 
+        # Verify real audio frames processed & commands sent
+        status, metrics, stats = window.worker.get_telemetry_snapshot()
+        frames_proc = stats.frames_processed if stats else 0
+        cmds_sent = status.commands_sent if status else 0
+        diagnostics["audio_frames_processed"] = frames_proc
+        diagnostics["commands_sent"] = cmds_sent
+        assert frames_proc > 0, f"No audio frames were processed during sync (frames: {frames_proc})"
+        assert cmds_sent > 0, f"No WiZ network commands were sent during sync (commands: {cmds_sent})"
+
         # Stop sync
+        stop_audio.set()
         window._on_stop_sync()
         t_wait_stop = time.perf_counter()
         while time.perf_counter() - t_wait_stop < 5.0:
@@ -214,9 +286,16 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
         assert window.worker.state == SyncState.IDLE, "Worker failed to return to IDLE state"
 
         resto = window.worker.last_restoration_report
-        if resto:
-            diagnostics["restoration_result"] = resto.result.value
-            diagnostics["restoration_details"] = resto.details
+        assert resto is not None and resto.result == RestorationResult.SUCCESS, f"Restoration report indicated non-success: {resto}"
+        diagnostics["restoration_result"] = resto.result.value
+        diagnostics["restoration_details"] = resto.details
+
+        # Verify restored state matches initial
+        post_state = asyncio.run(_query_state(target_ip))
+        assert post_state.is_on == initial_state.is_on, f"Restored power state ({post_state.is_on}) does not match initial ({initial_state.is_on})"
+        if initial_state.is_on:
+            assert post_state.active_mode == initial_state.active_mode, f"Restored mode ({post_state.active_mode}) does not match initial ({initial_state.active_mode})"
+        diagnostics["restoration_verified"] = True
 
         # Close window
         window.close()
@@ -271,13 +350,25 @@ def main() -> None:
         sys.exit(exit_code)
 
     if "--hardware-test" in sys.argv:
-        bulb_ip = "192.168.1.4"
+        bulb_ip = None
         diag_path = Path("packaged_hardware_test_report.json")
         for i, arg in enumerate(sys.argv):
             if arg == "--hardware-test" and i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
                 bulb_ip = sys.argv[i + 1]
             elif arg == "--diag-file" and i + 1 < len(sys.argv):
                 diag_path = Path(sys.argv[i + 1])
+
+        if not bulb_ip:
+            from src.wiz.discovery import discover_devices
+            print("No bulb IP specified. Discovering WiZ devices on local network...")
+            devices = asyncio.run(discover_devices(timeout=2.5))
+            if devices:
+                bulb_ip = devices[0].ip
+                print(f"Found WiZ bulb at {bulb_ip}")
+            else:
+                print("ERROR: No bulb IP specified and discovery found no WiZ bulbs on local network.")
+                sys.exit(1)
+
         exit_code = run_gui_hardware_test(bulb_ip, diag_path)
         sys.exit(exit_code)
 
@@ -301,6 +392,22 @@ def main() -> None:
 
     window = MainWindow()
     window.show()
+    window.raise_()
+    window.activateWindow()
+
+    # Bring window to foreground on Windows desktop
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = int(window.winId())
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+    if "--auto-start" in sys.argv or "--sync" in sys.argv:
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(600, window._on_start_sync)
 
     sys.exit(app.exec())
 

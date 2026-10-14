@@ -66,6 +66,9 @@ class SyncStatus:
     last_command_duration_ms: float
     is_dry_run: bool = False
     pending_states_count: int = 0
+    audio_focus: str = "full"
+    adaptive_rate: bool = False
+    p95_duration_ms: float = 0.0
 
 
 from enum import Enum

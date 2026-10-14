@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "qapp_initialized": true,
+  "stylesheet_loaded": true,
+  "main_window_created": true,
+  "widgets_verified": true,
+  "events_processed": true,
+  "window_closed": true,
+  "threads_terminated": true,
+  "error": null
+}

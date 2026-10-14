@@ -10,6 +10,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from src.audio.analyzer import AudioAnalyzer, AudioMetrics
+from src.audio.beat_detector import AudioFocus
 from src.audio.devices import AudioDevice, get_default_output_device
 
 logger = logging.getLogger("wiz_music_sync.audio.capture")
@@ -56,6 +57,7 @@ class AudioCapture:
         frames_per_buffer: int = 1024,
         queue_maxsize: int = 16,
         on_metrics: Optional[Callable[[AudioMetrics, CaptureStats], None]] = None,
+        audio_focus: AudioFocus = AudioFocus.FULL_MUSIC,
     ) -> None:
         """Initialize AudioCapture.
 
@@ -64,11 +66,13 @@ class AudioCapture:
             frames_per_buffer: Number of samples per buffer (default 1024).
             queue_maxsize: Maximum queued frames before oldest is dropped (default 16).
             on_metrics: Optional callback invoked with (metrics, stats) for each analyzed frame.
+            audio_focus: Selectable AudioFocus (FULL_MUSIC, RHYTHM, KICK).
         """
         self.device = device
         self.frames_per_buffer = int(frames_per_buffer)
         self.queue_maxsize = int(queue_maxsize)
         self.on_metrics = on_metrics
+        self._audio_focus = audio_focus
 
         self._pyaudio: Optional[pyaudio.PyAudio] = None
         self._stream: Optional[pyaudio.Stream] = None
@@ -94,6 +98,17 @@ class AudioCapture:
     def last_stats(self) -> Optional[CaptureStats]:
         """Most recently calculated CaptureStats."""
         return self._last_stats
+
+    @property
+    def audio_focus(self) -> AudioFocus:
+        """Currently active audio focus mode."""
+        return self._audio_focus
+
+    @audio_focus.setter
+    def audio_focus(self, focus: AudioFocus) -> None:
+        self._audio_focus = focus
+        if self._analyzer is not None:
+            self._analyzer.audio_focus = focus
 
     def _audio_callback(
         self,
@@ -207,6 +222,7 @@ class AudioCapture:
         self._analyzer = AudioAnalyzer(
             sample_rate=self.sample_rate,
             buffer_size=self.frames_per_buffer,
+            audio_focus=self._audio_focus,
         )
 
         self._pyaudio = pyaudio.PyAudio()

@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from src.audio.beat_detector import BeatDetector, BeatDetectorConfig
+from src.audio.beat_detector import AudioFocus, BeatDetector, BeatDetectorConfig, OnsetResult
 from src.audio.normalization import LoudnessNormalizer, NormalizerConfig
 
 
@@ -22,6 +22,13 @@ class AudioMetrics:
     is_onset: bool  # True when an attack/beat transient is detected
     onset_strength: float  # Magnitude of the detected transient [0.0, 1.0]
     is_silent: bool  # True when signal is below noise floor
+    audio_focus: AudioFocus = AudioFocus.FULL_MUSIC
+    is_percussion: bool = False
+    percussion_strength: float = 0.0
+    is_kick: bool = False
+    kick_strength: float = 0.0
+    rhythm_flux: float = 0.0
+    kick_flux: float = 0.0
 
 
 class AudioAnalyzer:
@@ -35,6 +42,7 @@ class AudioAnalyzer:
         mid_range: Tuple[float, float] = (250.0, 4000.0),
         treble_range: Tuple[float, float] = (4000.0, 16000.0),
         noise_floor: float = 0.003,
+        audio_focus: AudioFocus = AudioFocus.FULL_MUSIC,
     ) -> None:
         self.sample_rate = int(sample_rate)
         self.buffer_size = int(buffer_size)
@@ -42,6 +50,13 @@ class AudioAnalyzer:
         self.mid_range = mid_range
         self.treble_range = treble_range
         self.noise_floor = noise_floor
+        self.audio_focus = audio_focus
+
+        # Dual-resolution low-frequency buffer (2048 points for ~23.4 Hz bin resolution in 40-180 Hz kick range)
+        self._high_res_size = max(2048, self.buffer_size * 2)
+        self._ring_buffer = np.zeros(self._high_res_size, dtype=np.float32)
+        self._window_high_res = np.hanning(self._high_res_size).astype(np.float32)
+        self._freqs_high_res = np.fft.rfftfreq(self._high_res_size, d=1.0 / self.sample_rate)
 
         # Precompute window function and FFT frequency bins
         self._init_dsp_tables(self.buffer_size)
@@ -69,6 +84,13 @@ class AudioAnalyzer:
         self.mid_mask = (self.freqs >= self.mid_range[0]) & (self.freqs < self.mid_range[1])
         self.treble_mask = (self.freqs >= self.treble_range[0]) & (self.freqs <= treble_upper)
 
+        high_res = max(2048, size * 2)
+        if not hasattr(self, "_high_res_size") or high_res != self._high_res_size:
+            self._high_res_size = high_res
+            self._ring_buffer = np.zeros(self._high_res_size, dtype=np.float32)
+            self._window_high_res = np.hanning(self._high_res_size).astype(np.float32)
+            self._freqs_high_res = np.fft.rfftfreq(self._high_res_size, d=1.0 / self.sample_rate)
+
     def reset(self) -> None:
         """Reset internal normalizers and onset detector."""
         self.loudness_norm.reset()
@@ -76,6 +98,7 @@ class AudioAnalyzer:
         self.mid_norm.reset()
         self.treble_norm.reset()
         self.beat_detector.reset()
+        self._ring_buffer.fill(0.0)
 
     def analyze_frame(self, audio_data: np.ndarray, channels: int = 1) -> AudioMetrics:
         """Analyze a single PCM audio frame.
@@ -98,6 +121,13 @@ class AudioAnalyzer:
                 is_onset=False,
                 onset_strength=0.0,
                 is_silent=True,
+                audio_focus=self.audio_focus,
+                is_percussion=False,
+                percussion_strength=0.0,
+                is_kick=False,
+                kick_strength=0.0,
+                rhythm_flux=0.0,
+                kick_flux=0.0,
             )
 
         samples = np.asarray(audio_data, dtype=np.float32)
@@ -112,6 +142,13 @@ class AudioAnalyzer:
         if frame_len != self.buffer_size:
             # Recompute window & masks if buffer length changed dynamically
             self._init_dsp_tables(frame_len)
+
+        # Update high-resolution ring buffer for kick / sub-bass analysis
+        if frame_len >= self._high_res_size:
+            self._ring_buffer[:] = samples[-self._high_res_size:]
+        else:
+            self._ring_buffer = np.roll(self._ring_buffer, -frame_len)
+            self._ring_buffer[-frame_len:] = samples
 
         # 1. Calculate instantaneous RMS
         rms = float(np.sqrt(np.mean(samples ** 2)))
@@ -133,9 +170,19 @@ class AudioAnalyzer:
         mid = self.mid_norm.process(raw_mid)
         treble = self.treble_norm.process(raw_treble)
 
-        # 5. Onset / beat detection
-        is_onset, onset_strength = self.beat_detector.process(magnitudes, self.freqs)
-        spectral_flux = self.beat_detector.last_flux
+        # 5. Compute high-resolution FFT for kick analysis
+        windowed_high_res = self._ring_buffer * self._window_high_res
+        fft_high_res = np.fft.rfft(windowed_high_res)
+        mags_high_res = np.abs(fft_high_res) / (self._high_res_size / 2.0)
+
+        # 6. Onset / beat detection across all focus modes
+        onset_res = self.beat_detector.process_all(
+            magnitudes,
+            self.freqs,
+            focus=self.audio_focus,
+            high_res_spectrum=mags_high_res,
+            high_res_freqs=self._freqs_high_res,
+        )
 
         return AudioMetrics(
             rms=rms,
@@ -143,8 +190,15 @@ class AudioAnalyzer:
             bass=bass,
             mid=mid,
             treble=treble,
-            spectral_flux=spectral_flux,
-            is_onset=is_onset,
-            onset_strength=onset_strength,
+            spectral_flux=onset_res.spectral_flux,
+            is_onset=onset_res.is_onset,
+            onset_strength=onset_res.onset_strength,
             is_silent=is_silent,
+            audio_focus=self.audio_focus,
+            is_percussion=onset_res.is_percussion,
+            percussion_strength=onset_res.percussion_strength,
+            is_kick=onset_res.is_kick,
+            kick_strength=onset_res.kick_strength,
+            rhythm_flux=onset_res.rhythm_flux,
+            kick_flux=onset_res.kick_flux,
         )
