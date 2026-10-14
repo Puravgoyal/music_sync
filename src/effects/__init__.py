@@ -65,6 +65,8 @@ def list_effects() -> List[Dict[str, str]]:
     ]
 
 
+from src.effects.hybrid_av import HybridAVProcessor, HybridAVSettings, HybridType
+
 __all__ = [
     "BaseMusicEffect",
     "EffectSettings",
@@ -76,4 +78,7 @@ __all__ = [
     "EFFECT_REGISTRY",
     "get_effect",
     "list_effects",
+    "HybridAVProcessor",
+    "HybridAVSettings",
+    "HybridType",
 ]

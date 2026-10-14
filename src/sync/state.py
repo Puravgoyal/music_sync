@@ -14,6 +14,27 @@ class LightingState:
     is_on: bool = True
     timestamp: float = 0.0
 
+    def __init__(
+        self,
+        rgb: Optional[Tuple[int, int, int]] = None,
+        brightness: int = 128,
+        is_on: bool = True,
+        timestamp: float = 0.0,
+        r: Optional[int] = None,
+        g: Optional[int] = None,
+        b: Optional[int] = None,
+    ) -> None:
+        if r is not None and g is not None and b is not None:
+            self.rgb = (r, g, b)
+        elif rgb is not None:
+            self.rgb = rgb
+        else:
+            self.rgb = (255, 255, 255)
+        self.brightness = brightness
+        self.is_on = is_on
+        self.timestamp = timestamp if timestamp != 0.0 else time.perf_counter()
+        self.__post_init__()
+
     def __post_init__(self) -> None:
         if self.timestamp == 0.0:
             self.timestamp = time.perf_counter()
@@ -23,6 +44,18 @@ class LightingState:
         b = max(0, min(255, int(self.rgb[2])))
         self.rgb = (r, g, b)
         self.brightness = max(0, min(255, int(self.brightness)))
+
+    @property
+    def r(self) -> int:
+        return self.rgb[0]
+
+    @property
+    def g(self) -> int:
+        return self.rgb[1]
+
+    @property
+    def b(self) -> int:
+        return self.rgb[2]
 
     def is_similar_to(
         self,
@@ -69,6 +102,11 @@ class SyncStatus:
     audio_focus: str = "full"
     adaptive_rate: bool = False
     p95_duration_ms: float = 0.0
+    sync_mode: str = "music"
+    screen_fps: float = 0.0
+    screen_color: Optional[Tuple[int, int, int]] = None
+    screen_monitor: Optional[str] = None
+    capture_health: str = "OK"
 
 
 from enum import Enum

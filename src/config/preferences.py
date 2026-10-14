@@ -32,6 +32,15 @@ class AppPreferences:
     audio_focus: str = "full"
     adaptive_rate: bool = False
     safe_max_rate_hz: float = 8.0
+    sync_mode: str = "music"
+    screen_monitor_index: int = 0
+    color_strategy: str = "average"
+    edge_region: str = "all"
+    edge_thickness: float = 0.15
+    smoothing_preset: str = "cinematic"
+    detect_black_bars: bool = True
+    hybrid_type: str = "cinematic"
+    audio_contribution: float = 0.35
 
     def validate(self) -> None:
         """Validate and clamp settings to safe limits."""
@@ -50,6 +59,20 @@ class AppPreferences:
         if self.audio_focus not in ("full", "rhythm", "kick"):
             self.audio_focus = "full"
         self.safe_max_rate_hz = max(4.0, min(10.0, float(self.safe_max_rate_hz)))
+        if self.sync_mode not in ("music", "screen", "hybrid"):
+            self.sync_mode = "music"
+        self.screen_monitor_index = max(0, int(self.screen_monitor_index))
+        if self.color_strategy not in ("average", "dominant", "edge"):
+            self.color_strategy = "average"
+        if self.edge_region not in ("all", "left", "right", "top", "bottom"):
+            self.edge_region = "all"
+        self.edge_thickness = max(0.02, min(0.45, float(self.edge_thickness)))
+        if self.smoothing_preset not in ("cinematic", "balanced", "responsive"):
+            self.smoothing_preset = "cinematic"
+        self.detect_black_bars = bool(self.detect_black_bars)
+        if self.hybrid_type not in ("cinematic", "rhythm", "kick"):
+            self.hybrid_type = "cinematic"
+        self.audio_contribution = max(0.0, min(1.0, float(self.audio_contribution)))
 
 
 def get_preferences_path() -> Path:
