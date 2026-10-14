@@ -84,10 +84,12 @@ def run_gui_smoke_test(diag_file: Optional[Path] = None) -> int:
 
         # Confirm all primary widgets initialized properly
         assert window.device_panel is not None, "device_panel not initialized"
+        assert window.screen_panel is not None, "screen_panel not initialized"
         assert window.audio_panel is not None, "audio_panel not initialized"
         assert window.status_panel is not None, "status_panel not initialized"
         assert window.spectrum_view is not None, "spectrum_view not initialized"
         assert window.effects_panel is not None, "effects_panel not initialized"
+        assert window.hybrid_panel is not None, "hybrid_panel not initialized"
         diagnostics["widgets_verified"] = True
 
         window.show()

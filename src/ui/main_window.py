@@ -1,4 +1,4 @@
-"""Main desktop application window for WiZ Music Sync."""
+"""Main desktop application window for WiZ Music, Screen Ambience, and Hybrid AV Sync."""
 
 import logging
 from pathlib import Path
@@ -7,6 +7,8 @@ from typing import Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -24,6 +26,8 @@ from src.sync.state import RestorationReport, RestorationResult
 from src.ui.widgets.audio_panel import AudioPanel
 from src.ui.widgets.device_panel import DevicePanel
 from src.ui.widgets.effects_panel import EffectsPanel
+from src.ui.widgets.hybrid_panel import HybridPanel
+from src.ui.widgets.screen_panel import ScreenPanel
 from src.ui.widgets.spectrum_view import SpectrumView
 from src.ui.widgets.status_panel import StatusPanel
 from src.ui.workers.sync_worker import SyncState, SyncWorker
@@ -32,13 +36,13 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Main graphical interface window for WiZ Music Sync."""
+    """Main graphical interface window for WiZ Music, Screen Ambience, and Hybrid AV Sync."""
 
     def __init__(self, prefs_manager: Optional[PreferencesManager] = None) -> None:
         super().__init__()
         self.setWindowTitle("WiZ Music Sync")
-        self.resize(800, 840)
-        self.setMinimumSize(680, 700)
+        self.resize(840, 880)
+        self.setMinimumSize(700, 720)
 
         self._is_closing = False
         self._is_closed = False
@@ -66,7 +70,6 @@ class MainWindow(QMainWindow):
         return self._telemetry_timer
 
     def _setup_ui(self) -> None:
-        # Central Scroll Area to handle compact screen resolutions gracefully
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -82,39 +85,68 @@ class MainWindow(QMainWindow):
 
         title_lbl = QLabel("WiZ Music Sync")
         title_lbl.setObjectName("headingLabel")
-        sub_lbl = QLabel("Real-Time Windows WASAPI System Audio to Philips WiZ Smart Lighting")
+        sub_lbl = QLabel("Real-Time Windows WASAPI Audio, Screen Ambience & Hybrid AV Lighting")
         sub_lbl.setObjectName("subheadingLabel")
 
         header_layout.addWidget(title_lbl)
         header_layout.addWidget(sub_lbl)
         main_layout.addLayout(header_layout)
 
+        # Primary Mode Selection Bar
+        mode_box = QFrame()
+        mode_box.setStyleSheet(
+            "background-color: #1e2025; border: 1px solid #2d2f36; border-radius: 8px; padding: 6px 12px;"
+        )
+        mode_bar_layout = QHBoxLayout(mode_box)
+        mode_bar_layout.setContentsMargins(4, 4, 4, 4)
+
+        mode_lbl = QLabel("Synchronization Source:")
+        mode_lbl.setStyleSheet("font-weight: 700; color: #38bdf8; font-size: 13px;")
+        mode_bar_layout.addWidget(mode_lbl)
+
+        self.source_combo = QComboBox()
+        self.source_combo.setMinimumHeight(34)
+        self.source_combo.setStyleSheet(
+            "font-weight: 600; font-size: 12px; padding: 4px 8px;"
+        )
+        self.source_combo.addItem("🎵 Mode A — Music Sync (WASAPI Audio Reactive)", "music")
+        self.source_combo.addItem("🖥️ Mode B — Screen Sync (Ambilight Video Ambience)", "screen")
+        self.source_combo.addItem("🎬 Mode C — Hybrid AV Sync (Screen Color + Audio Pulse)", "hybrid")
+        self.source_combo.currentIndexChanged.connect(self._on_sync_mode_changed)
+        mode_bar_layout.addWidget(self.source_combo, stretch=2)
+
+        main_layout.addWidget(mode_box)
+
         # Two-column layout for controls and visualizer
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(14)
 
-        # Left Column (Device, Audio Source, Primary Controls)
+        # Left Column (Device, Sources, Controls)
         left_col = QVBoxLayout()
         left_col.setSpacing(12)
 
         self.device_panel = DevicePanel(self)
+        self.screen_panel = ScreenPanel(self)
         self.audio_panel = AudioPanel(self)
         self.status_panel = StatusPanel(self)
 
         left_col.addWidget(self.device_panel)
+        left_col.addWidget(self.screen_panel)
         left_col.addWidget(self.audio_panel)
         left_col.addWidget(self.status_panel)
         left_col.addStretch()
 
-        # Right Column (Live Spectrum, Rhythm Onset, Effect Tuning)
+        # Right Column (Live Spectrum, Rhythm Onset, Tuning)
         right_col = QVBoxLayout()
         right_col.setSpacing(12)
 
         self.spectrum_view = SpectrumView(self)
         self.effects_panel = EffectsPanel(self)
+        self.hybrid_panel = HybridPanel(self)
 
         right_col.addWidget(self.spectrum_view)
         right_col.addWidget(self.effects_panel)
+        right_col.addWidget(self.hybrid_panel)
         right_col.addStretch()
 
         columns_layout.addLayout(left_col, stretch=1)
@@ -138,11 +170,17 @@ class MainWindow(QMainWindow):
         # Audio Panel signals
         self.audio_panel.device_changed.connect(self._on_audio_device_changed)
 
+        # Screen Panel signals
+        self.screen_panel.settings_changed.connect(self._on_screen_settings_changed)
+
         # Effects Panel signals
         self.effects_panel.effect_changed.connect(self._on_effect_changed)
         self.effects_panel.settings_changed.connect(self._on_settings_changed)
         self.effects_panel.audio_focus_changed.connect(self._on_audio_focus_changed)
         self.effects_panel.adaptive_rate_changed.connect(self._on_adaptive_rate_changed)
+
+        # Hybrid Panel signals
+        self.hybrid_panel.hybrid_settings_changed.connect(self._on_hybrid_settings_changed)
 
         # Status Panel signals
         self.status_panel.start_clicked.connect(self._on_start_sync)
@@ -168,6 +206,29 @@ class MainWindow(QMainWindow):
         # Audio Device
         if self.prefs.last_audio_device_name:
             self.audio_panel.refresh_devices(preferred_name=self.prefs.last_audio_device_name)
+
+        # Sync Mode
+        cur_mode = getattr(self.prefs, "sync_mode", "music")
+        for i in range(self.source_combo.count()):
+            if self.source_combo.itemData(i) == cur_mode:
+                self.source_combo.setCurrentIndex(i)
+                break
+        self._apply_mode_layout(cur_mode)
+
+        # Screen settings
+        self.screen_panel.set_selected_monitor_index(getattr(self.prefs, "screen_monitor_index", 0))
+        self.screen_panel.set_color_strategy(getattr(self.prefs, "color_strategy", "average"))
+        self.screen_panel.set_edge_region(getattr(self.prefs, "edge_region", "all"))
+        self.screen_panel.set_edge_thickness(getattr(self.prefs, "edge_thickness", 0.15))
+        self.screen_panel.set_smoothing_preset(getattr(self.prefs, "smoothing_preset", "cinematic"))
+        self.screen_panel.set_detect_black_bars(getattr(self.prefs, "detect_black_bars", True))
+        self.screen_panel.set_brightness_range(self.prefs.min_brightness, self.prefs.max_brightness)
+
+        # Hybrid settings
+        self.hybrid_panel.set_hybrid_type(getattr(self.prefs, "hybrid_type", "cinematic"))
+        self.hybrid_panel.set_audio_contribution(getattr(self.prefs, "audio_contribution", 0.35))
+        self.hybrid_panel.set_beat_intensity(self.prefs.beat_strength)
+        self.hybrid_panel.set_audio_focus(getattr(self.prefs, "audio_focus", "full"))
 
         # Effects and Sliders
         self.effects_panel.set_selected_effect(self.prefs.preferred_effect)
@@ -199,11 +260,22 @@ class MainWindow(QMainWindow):
         dev = self.audio_panel.get_selected_device()
         self.prefs.last_audio_device_name = dev.name if dev else None
 
+        self.prefs.sync_mode = str(self.source_combo.currentData() or "music")
+        self.prefs.screen_monitor_index = self.screen_panel.get_selected_monitor_index()
+        self.prefs.color_strategy = self.screen_panel.get_color_strategy()
+        self.prefs.edge_region = self.screen_panel.get_edge_region()
+        self.prefs.edge_thickness = self.screen_panel.get_edge_thickness()
+        self.prefs.smoothing_preset = self.screen_panel.get_smoothing_preset()
+        self.prefs.detect_black_bars = self.screen_panel.get_detect_black_bars()
+
+        self.prefs.hybrid_type = self.hybrid_panel.get_hybrid_type()
+        self.prefs.audio_contribution = self.hybrid_panel.get_audio_contribution()
+
         self.prefs.preferred_effect = self.effects_panel.get_selected_effect()
         settings = self.effects_panel.get_settings()
         self.prefs.sensitivity = settings.sensitivity
-        self.prefs.min_brightness = settings.min_brightness
-        self.prefs.max_brightness = settings.max_brightness
+        self.prefs.min_brightness = self.screen_panel.get_min_brightness()
+        self.prefs.max_brightness = self.screen_panel.get_max_brightness()
         self.prefs.color_smoothing = settings.color_smoothing
         self.prefs.attack_speed = settings.attack_speed
         self.prefs.release_speed = settings.release_speed
@@ -216,6 +288,36 @@ class MainWindow(QMainWindow):
         self.prefs.dry_run = self.status_panel.dry_run_chk.isChecked()
 
         self.prefs_mgr.save(self.prefs)
+
+    def _apply_mode_layout(self, mode: str) -> None:
+        """Show and hide panels depending on active sync mode."""
+        if mode == "music":
+            self.audio_panel.setVisible(True)
+            self.screen_panel.setVisible(False)
+            self.effects_panel.setVisible(True)
+            self.hybrid_panel.setVisible(False)
+            self.spectrum_view.setVisible(True)
+            self.status_panel.set_mode("music")
+        elif mode == "screen":
+            self.audio_panel.setVisible(False)
+            self.screen_panel.setVisible(True)
+            self.effects_panel.setVisible(False)
+            self.hybrid_panel.setVisible(False)
+            self.spectrum_view.setVisible(False)
+            self.status_panel.set_mode("screen")
+        else:  # hybrid
+            self.audio_panel.setVisible(True)
+            self.screen_panel.setVisible(True)
+            self.effects_panel.setVisible(False)
+            self.hybrid_panel.setVisible(True)
+            self.spectrum_view.setVisible(True)
+            self.status_panel.set_mode("hybrid")
+
+    def _on_sync_mode_changed(self, idx: int) -> None:
+        mode = str(self.source_combo.currentData() or "music")
+        self.prefs.sync_mode = mode
+        self._apply_mode_layout(mode)
+        self.statusBar.showMessage(f"Switched sync mode to: {mode.upper()}", 3000)
 
     # ------------------ Action Handlers ------------------
 
@@ -243,6 +345,21 @@ class MainWindow(QMainWindow):
 
     def _on_settings_changed(self, settings: EffectSettings) -> None:
         self.worker.set_settings(settings)
+
+    def _on_screen_settings_changed(self) -> None:
+        self.worker.set_screen_settings(
+            color_strategy=self.screen_panel.get_color_strategy(),
+            edge_region=self.screen_panel.get_edge_region(),
+            edge_thickness=self.screen_panel.get_edge_thickness(),
+            smoothing_preset=self.screen_panel.get_smoothing_preset(),
+            detect_black_bars=self.screen_panel.get_detect_black_bars(),
+        )
+
+    def _on_hybrid_settings_changed(self) -> None:
+        self.worker.set_hybrid_settings(
+            hybrid_type=self.hybrid_panel.get_hybrid_type(),
+            audio_contribution=self.hybrid_panel.get_audio_contribution(),
+        )
 
     def _on_audio_focus_changed(self, focus: str) -> None:
         self.prefs.audio_focus = focus
@@ -277,6 +394,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        mode = str(self.source_combo.currentData() or "music")
         dev = self.audio_panel.get_selected_device()
         dev_idx = dev.index if dev else None
 
@@ -286,12 +404,19 @@ class MainWindow(QMainWindow):
         audio_focus = self.effects_panel.get_audio_focus()
         adaptive_rate = self.effects_panel.get_adaptive_rate()
 
-        self.status_panel.set_busy_state("Connecting...", allow_cancel=True)
-        self.statusBar.showMessage(f"Starting music sync ({effect_name}, focus: {audio_focus})...")
+        # Update brightness from screen panel if screen/hybrid mode
+        if mode in ("screen", "hybrid"):
+            settings.min_brightness = self.screen_panel.get_min_brightness()
+            settings.max_brightness = self.screen_panel.get_max_brightness()
 
-        # Disable device and audio selection during active sync
+        self.status_panel.set_busy_state("Connecting...", allow_cancel=True)
+        self.statusBar.showMessage(f"Starting {mode.upper()} synchronization...")
+
+        # Disable device and source selection during active sync
+        self.source_combo.setEnabled(False)
         self.device_panel.set_controls_enabled(False)
         self.audio_panel.set_controls_enabled(False)
+        self.screen_panel.set_controls_enabled(False)
 
         self.worker.start_sync(
             bulb_ip=bulb_ip,
@@ -302,11 +427,20 @@ class MainWindow(QMainWindow):
             dry_run=dry_run,
             audio_focus=audio_focus,
             adaptive_rate=adaptive_rate,
+            sync_mode=mode,
+            screen_monitor_index=self.screen_panel.get_selected_monitor_index(),
+            color_strategy=self.screen_panel.get_color_strategy(),
+            edge_region=self.screen_panel.get_edge_region(),
+            edge_thickness=self.screen_panel.get_edge_thickness(),
+            smoothing_preset=self.screen_panel.get_smoothing_preset(),
+            detect_black_bars=self.screen_panel.get_detect_black_bars(),
+            hybrid_type=self.hybrid_panel.get_hybrid_type(),
+            audio_contribution=self.hybrid_panel.get_audio_contribution(),
         )
 
     def _on_stop_sync(self) -> None:
         self.status_panel.set_busy_state("Stopping...", allow_cancel=False)
-        self.statusBar.showMessage("Stopping music sync and restoring bulb state...")
+        self.statusBar.showMessage("Stopping synchronization and restoring bulb state...")
         self.worker.stop_sync()
 
     # ------------------ Worker Event Callbacks ------------------
@@ -323,23 +457,27 @@ class MainWindow(QMainWindow):
         """Handle worker state transitions."""
         logger.debug("MainWindow received worker state transition: %s", state.name)
         if state == SyncState.STARTING:
+            self.source_combo.setEnabled(False)
             self.device_panel.set_controls_enabled(False)
             self.audio_panel.set_controls_enabled(False)
+            self.screen_panel.set_controls_enabled(False)
             self.status_panel.set_busy_state("Connecting...", allow_cancel=True)
-            self.statusBar.showMessage("Starting music sync...")
+            self.statusBar.showMessage("Starting synchronization...")
         elif state == SyncState.RUNNING:
             if not self._telemetry_timer.isActive():
                 self._telemetry_timer.start()
         elif state == SyncState.STOPPING:
             self._telemetry_timer.stop()
             self.status_panel.set_busy_state("Stopping...", allow_cancel=False)
-            self.statusBar.showMessage("Stopping music sync and restoring bulb state...")
+            self.statusBar.showMessage("Stopping synchronization and restoring bulb state...")
         elif state == SyncState.IDLE:
             self._telemetry_timer.stop()
             self.status_panel.set_sync_state(False)
             self.status_panel.reset_button_enabled()
+            self.source_combo.setEnabled(True)
             self.device_panel.set_controls_enabled(True)
             self.audio_panel.set_controls_enabled(True)
+            self.screen_panel.set_controls_enabled(True)
             self.spectrum_view.update_metrics(None)
         elif state == SyncState.CLOSED:
             self._telemetry_timer.stop()
@@ -351,40 +489,45 @@ class MainWindow(QMainWindow):
         self.status_panel.reset_button_enabled()
         if not self._telemetry_timer.isActive():
             self._telemetry_timer.start()
-        self.statusBar.showMessage(f"Live music synchronization active with {mode_text}.")
+        mode_name = str(self.source_combo.currentText())
+        self.statusBar.showMessage(f"Live synchronization active: {mode_name} with {mode_text}.")
 
     def _on_sync_stopped(self) -> None:
         self._telemetry_timer.stop()
         self.status_panel.set_sync_state(False)
         self.status_panel.reset_button_enabled()
+        self.source_combo.setEnabled(True)
         self.device_panel.set_controls_enabled(True)
         self.audio_panel.set_controls_enabled(True)
+        self.screen_panel.set_controls_enabled(True)
         self.spectrum_view.update_metrics(None)
 
         report = self.worker.last_restoration_report
         if report:
             if report.result == RestorationResult.SUCCESS:
-                msg = f"Music sync stopped. {report.result.value} ({report.details})."
+                msg = f"Synchronization stopped. {report.result.value} ({report.details})."
             elif report.result == RestorationResult.SKIPPED:
-                msg = f"Music sync stopped. {report.result.value}."
+                msg = f"Synchronization stopped. {report.result.value}."
             elif report.result == RestorationResult.UNAVAILABLE:
-                msg = f"Music sync stopped. {report.result.value}."
+                msg = f"Synchronization stopped. {report.result.value}."
             else:  # FAILED
-                msg = f"Music sync stopped. {report.result.value}: {report.details}."
+                msg = f"Synchronization stopped. {report.result.value}: {report.details}."
             self.statusBar.showMessage(msg, 7000)
             logger.info("Sync stopped: %s", msg)
         else:
-            self.statusBar.showMessage("Music sync stopped.", 5000)
+            self.statusBar.showMessage("Synchronization stopped.", 5000)
 
     def _on_sync_error(self, error_msg: str) -> None:
         self._telemetry_timer.stop()
         self.status_panel.set_sync_state(False)
         self.status_panel.reset_button_enabled()
+        self.source_combo.setEnabled(True)
         self.device_panel.set_controls_enabled(True)
         self.audio_panel.set_controls_enabled(True)
+        self.screen_panel.set_controls_enabled(True)
         self.spectrum_view.update_metrics(None)
         self.statusBar.showMessage(f"Sync error: {error_msg}")
-        QMessageBox.critical(self, "Synchronization Error", f"Failed to start music sync:\n\n{error_msg}")
+        QMessageBox.critical(self, "Synchronization Error", f"Failed to start synchronization:\n\n{error_msg}")
 
     def _on_telemetry_tick(self) -> None:
         """Periodic timer tick executing strictly on Qt GUI main thread (~30 Hz)."""

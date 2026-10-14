@@ -174,8 +174,18 @@ class SyncWorker(QObject):
         dry_run: bool = False,
         audio_focus: str = "full",
         adaptive_rate: bool = False,
+        sync_mode: str = "music",
+        screen_monitor_index: int = 0,
+        color_strategy: str = "average",
+        edge_region: str = "all",
+        edge_thickness: float = 0.15,
+        smoothing_preset: str = "cinematic",
+        detect_black_bars: bool = True,
+        hybrid_type: str = "cinematic",
+        audio_contribution: float = 0.35,
+        custom_capture_backend=None,
     ) -> bool:
-        """Start music synchronization on the background asyncio engine.
+        """Start synchronization on the background asyncio engine for Music, Screen, or Hybrid mode.
 
         Returns:
             True if startup transition began, False if rejected (e.g. not IDLE).
@@ -220,6 +230,16 @@ class SyncWorker(QObject):
                     restore_state=restore_state,
                     audio_focus=af,
                     adaptive_rate=adaptive_rate,
+                    sync_mode=sync_mode,
+                    screen_monitor_index=screen_monitor_index,
+                    color_strategy=color_strategy,
+                    edge_region=edge_region,
+                    edge_thickness=edge_thickness,
+                    smoothing_preset=smoothing_preset,
+                    detect_black_bars=detect_black_bars,
+                    hybrid_type=hybrid_type,
+                    audio_contribution=audio_contribution,
+                    custom_capture_backend=custom_capture_backend,
                 )
                 self._engine = engine
                 await engine.start()
@@ -326,6 +346,36 @@ class SyncWorker(QObject):
         """Toggle adaptive update rate dynamically. Thread-safe."""
         if self._engine:
             self._engine.set_adaptive_rate(enabled)
+
+    def set_screen_settings(
+        self,
+        color_strategy: Optional[str] = None,
+        edge_region: Optional[str] = None,
+        edge_thickness: Optional[float] = None,
+        smoothing_preset: Optional[str] = None,
+        detect_black_bars: Optional[bool] = None,
+    ) -> None:
+        """Update screen capture and extraction settings dynamically. Thread-safe."""
+        if self._engine:
+            self._engine.set_screen_settings(
+                color_strategy=color_strategy,
+                edge_region=edge_region,
+                edge_thickness=edge_thickness,
+                smoothing_preset=smoothing_preset,
+                detect_black_bars=detect_black_bars,
+            )
+
+    def set_hybrid_settings(
+        self,
+        hybrid_type: Optional[str] = None,
+        audio_contribution: Optional[float] = None,
+    ) -> None:
+        """Update hybrid AV parameters dynamically. Thread-safe."""
+        if self._engine:
+            self._engine.set_hybrid_settings(
+                hybrid_type=hybrid_type,
+                audio_contribution=audio_contribution,
+            )
 
     def get_telemetry_snapshot(
         self,
