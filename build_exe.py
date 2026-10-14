@@ -52,6 +52,12 @@ def build_executable() -> int:
         "PySide6.QtGui",
         "--hidden-import",
         "PySide6.QtWidgets",
+        "--hidden-import",
+        "dxcam",
+        "--hidden-import",
+        "mss",
+        "--hidden-import",
+        "comtypes",
         str(entrypoint),
     ]
 
