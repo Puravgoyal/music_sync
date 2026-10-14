@@ -194,6 +194,14 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
                 break
         assert diagnostics["connection_tested"] is True, f"Bulb connection test failed or timed out: {window.worker.last_test_message}"
 
+        # Ensure default loopback device is selected on audio panel
+        from src.audio.devices import get_default_output_device
+        def_dev = get_default_output_device()
+        if def_dev:
+            window.audio_panel.refresh_devices(preferred_name=def_dev.name)
+        selected_dev = window.audio_panel.get_selected_device()
+        clean_name = selected_dev.clean_name() if selected_dev else None
+
         # Feed test audio pulses so loopback capture has active audio frames during test
         stop_audio = threading.Event()
         def _feed_test_audio():
@@ -201,19 +209,29 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
                 import pyaudiowpatch as pyaudio
                 import numpy as np
                 pa = pyaudio.PyAudio()
-                dev_info = pa.get_default_output_device_info()
-                rate = int(dev_info["defaultSampleRate"])
-                st = pa.open(format=pyaudio.paFloat32, channels=1, rate=rate, output=True)
-                t_tone = np.linspace(0, 0.08, int(rate * 0.08), endpoint=False)
-                tone_samples = (0.25 * np.sin(2 * np.pi * 65.0 * t_tone)).astype(np.float32)
+                target_idx = None
+                for i in range(pa.get_device_count()):
+                    d = pa.get_device_info_by_index(i)
+                    if d.get("maxOutputChannels", 0) > 0 and (not clean_name or clean_name.lower() in d["name"].lower()):
+                        target_idx = i
+                        break
+                if target_idx is None:
+                    target_idx = pa.get_default_output_device_info()["index"]
+
+                out_info = pa.get_device_info_by_index(target_idx)
+                rate = int(out_info["defaultSampleRate"])
+                channels = min(2, int(out_info.get("maxOutputChannels", 2)))
+                st = pa.open(format=pyaudio.paFloat32, channels=channels, rate=rate, output=True, output_device_index=target_idx)
+                t_tone = np.linspace(0, 0.1, int(rate * 0.1), endpoint=False)
+                mono = (0.25 * np.sin(2 * np.pi * 100.0 * t_tone)).astype(np.float32)
+                samples = np.column_stack([mono, mono]).ravel() if channels == 2 else mono
                 while not stop_audio.is_set():
-                    st.write(tone_samples.tobytes())
-                    time.sleep(0.12)
+                    st.write(samples.tobytes())
                 st.stop_stream()
                 st.close()
                 pa.terminate()
             except Exception as e:
-                logger.debug("Test audio playback finished: %s", e)
+                logger.error("Test audio playback error: %s", e)
 
         audio_th = threading.Thread(target=_feed_test_audio, daemon=True)
         audio_th.start()
@@ -316,8 +334,13 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
 
     if diag_file:
         try:
+            out_diag = dict(diagnostics)
+            if "target_ip" in out_diag and out_diag["target_ip"]:
+                parts = str(out_diag["target_ip"]).split(".")
+                if len(parts) == 4:
+                    out_diag["target_ip"] = f"{parts[0]}.{parts[1]}.{parts[2]}.X"
             with open(diag_file, "w", encoding="utf-8") as f:
-                json.dump(diagnostics, f, indent=2)
+                json.dump(out_diag, f, indent=2)
         except Exception as e:
             logger.warning("Failed writing hardware test diagnostics to %s: %s", diag_file, e)
 

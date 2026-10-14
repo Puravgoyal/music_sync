@@ -131,9 +131,13 @@ To prevent sustained vocal melodies, podcasts, and speech from causing unnatural
 - Produces sharp, clean hits on drums while resting smoothly during vocal passages.
 
 ### Mode C — Kick Focus (`kick`)
-- **Dual-Resolution FFT:** Runs a dedicated 2048-sample ring buffer computed in real time alongside the primary 1024-sample FFT. This yields a fine 23.44 Hz bin resolution (7 discrete bins in the 40–180 Hz kick range) with zero additional phase latency.
+### Mode C — Kick Focus (`kick`)
+- **Dual-Resolution FFT:** Runs a dedicated 2048-sample ring buffer computed in real time alongside the primary 1024-sample FFT. This yields a fine 23.44 Hz bin resolution (7 discrete bins in the 40–180 Hz kick range).
+- **Temporal Resolution vs. Frequency Resolution Trade-Off:**
+  By the Heisenberg-Gabor uncertainty principle ($\Delta f \cdot \Delta t \ge \frac{1}{4\pi}$), isolating fundamental bass kick frequencies (40–180 Hz) without spectral leakage from vocal formants requires narrower frequency bins ($\Delta f = 23.44\text{ Hz}$ with $N=2048$ vs $\Delta f = 46.88\text{ Hz}$ with $N=1024$).
+  Because the 2048-sample ring buffer slides forward with each 1024-sample hop ($\approx 21.3\text{ ms}$ at 48 kHz), the added acoustic group delay is only $\frac{N_{2048} - N_{1024}}{2 \cdot f_s} \approx 10.6\text{ ms}$. This ~10.6 ms delay is psychoacoustically imperceptible and well within the bulb's ~250 ms command interval.
 - **Attack Slope Differentiation:** Computes instantaneous energy derivative $dE/dt = \max(0, E_{kick} - \text{baseline})$.
-- **Sustained Bassline Rejection:** Sustained 808 sub-bass tones and synth pedals are rejected after their initial transient hit, isolating true kick drum hits.
+- **Sustained Bassline Rejection:** Sub-bass energy concentration checks and adaptive thresholding reject continuous 808 drones and vocal formants after their initial attack, isolating true kick drum hits.
 
 ---
 
@@ -142,21 +146,29 @@ To prevent sustained vocal melodies, podcasts, and speech from causing unnatural
 The Philips WiZ E27 multicolour bulb uses an Espressif ESP25 microcontroller (`ESP25_SHRGB_01`, firmware `1.38.0`) communicating over local UDP port `38899`.
 
 ### Empirical Rate Benchmark Findings
-Benchmarked directly against physical hardware (`192.168.1.4`):
-- **3.5 Hz – 4.0 Hz:** Rock-solid stability. Round-trip acknowledgement latencies average ~93.9 ms with 100% command delivery.
-- **5.0 Hz – 6.0 Hz:** High performance on clean 2.4 GHz Wi-Fi links. Average latencies ~103–133 ms.
-- **8.0 Hz:** Peak attainable throughput (5.91 Hz actual commands executed per second).
-- **10.0 Hz:** Saturated ESP25 receive buffer. Commands queue up inside the microcontroller, causing p95 latency to spike to 443 ms and dropping effective command execution to ~4.68 Hz.
+Benchmarked directly against physical hardware (`192.168.1.4`) with adequately sampled 8-second runs and smooth transitions:
+- **4.0 Hz (Default):** **100% Stable.** Achieved 3.90 commands/sec throughput with 100% command success rate. Latency: p50 = 120.9 ms, p95 = 202.5 ms. **0.0%** long-tail delays > 250 ms. **This is retained as the default safe operating rate.**
+- **5.0 Hz:** Achieved 4.40 commands/sec throughput (100% success). Latency: p50 = 190.7 ms, p95 = 297.6 ms. **8.3%** packets suffered long-tail delays > 250 ms (max 772 ms) due to ESP25 internal buffer queuing. Classified as degraded/unstable.
+- **6.0 Hz:** Achieved 4.87 commands/sec throughput (100% success). Latency: p50 = 169.9 ms, p95 = 227.1 ms. **2.6%** long-tail delays > 250 ms (max 810 ms).
+- **8.0 Hz:** Achieved 4.81 commands/sec throughput (100% success). Latency: p50 = 192.9 ms, p95 = 300.4 ms. **7.5%** long-tail delays > 250 ms (max 811 ms).
+- **Physical Bottleneck Conclusion:** The hardware throughput ceiling plateaus around **4.4–4.8 Hz**. Pushing update rates beyond 4.0 Hz does not produce faster light updates; instead, datagrams queue up inside the ESP25 microcontroller, inflating p95 latencies past 300 ms and causing irregular long-tail delays.
 
-### Adaptive Update Rate Controller
-- **Link Quality Monitoring:** Computes rolling p95 round-trip latency over the last 20 acknowledged UDP commands.
-- **Auto Step-Up:** If latency is low (p95 < 55 ms) and 10+ consecutive packets succeed, the scheduler steps up the update rate by +0.5 Hz.
-- **Immediate Step-Down:** If round-trip latency exceeds 110 ms, the rate steps down by -0.5 Hz.
-- **Failure Backoff:** If a UDP packet times out or is dropped, the scheduler immediately steps down by -1.0 Hz and backs off.
+### Calibrated Adaptive Rate Controller
+The adaptive rate controller balances responsive lighting with network congestion:
+- **Calibrated Latency Thresholds:** Real-world round-trip UDP command times on the ESP25 average ~110–125 ms.
+  - **Step-Up Threshold:** `p95 <= 115.0 ms` with at least 10 consecutive successful commands.
+  - **Step-Down Threshold:** `p95 >= 135.0 ms` or any dropped packet.
+  - **Hysteresis Band:** A 20 ms margin (115–135 ms) prevents rapid rate oscillation.
+  - **Adjustment Cooldown:** Enforces a 4.0-second stabilization window between rate adaptations.
+  - **Safe Maximum Cap:** Constrained to 5.0 Hz to protect against queue overflow.
 
-### Latency-Aware Beat Preservation
-- In standard rate limiters, sudden drum hits occurring between rate-limited ticks are either dropped or queued, causing delayed out-of-time flashes.
-- `BulbCommandScheduler` tracks incoming beat transients via `BeatEvent`. If a beat event occurs while a tick is pending, the beat state is preserved and dispatched on the very next available tick if fresh ($\le 180\text{ ms}$). Stale beats older than 180 ms are discarded to prevent out-of-time lighting flashes.
+### Latency-Aware Beat Preservation & Expiration
+- **Dynamic Age Window:** Instead of a static window that causes beats to expire mid-interval at 4 Hz ($T = 250\text{ ms}$), the scheduler calculates effective maximum beat age dynamically:
+  $$\tau = \min\left(0.35, \max\left(0.20, \frac{1.25}{\text{rate\_hz}}\right)\right)$$
+  At 4.0 Hz, $\tau = 312.5\text{ ms}$, ensuring any beat arriving during the 250 ms interval is preserved for dispatch on the next available slot.
+- **Superseding:** If a stronger beat transient arrives while a weaker beat is pending, the stronger beat supersedes it without extra latency.
+- **Expiration on Network Stalls:** If a network lag spike delays transmission beyond $\tau$, the pending beat safely expires to prevent jarring, out-of-time lighting pulses.
+- **Deterministic Telemetry:** Tracks `beats_received`, `beats_dispatched`, `beats_expired`, `beats_superseded`, and `beat_dispatch_ratio` (achieving 100% dispatch under normal network timing).
 
 ---
 
@@ -184,12 +196,12 @@ Benchmarked directly against physical hardware (`192.168.1.4`):
   ├── Dual-Res Low-Freq FFT (2048-pt Ring Buffer)             ├── Latency-Aware Beat Preservation
   └── BeatDetector (Full, Rhythm, Kick Modes)                 ├── Adaptive Rate Controller
         │                                                     ├── Deadband Filter (Δ4)
-        ▼                                                     ├── Rate Limiter (2-8 Hz)
+        ▼                                                     ├── Rate Limiter (2-5 Hz Safe Cap)
    Lighting Effects Engine                                    └── Non-Overlapping Lock
    (Spectrum, Beat, Bass, Smooth, Ambient)                      │
                                                                 ▼
                                                           WiZ Smart Bulb
-                                                          (UDP 192.168.1.4)
+                                                          (UDP Port 38899)
 ```
 
 ### Key Reliability Safeguards
@@ -212,7 +224,7 @@ python -m src.music_sync --focus rhythm
 python -m src.music_sync --ip 192.168.1.4 --effect beat --focus kick
 
 # Run with adaptive update rate enabled (steps up on low latency, backs off on congestion)
-python -m src.music_sync --ip 192.168.1.4 --effect bass --rate 5.0 --adaptive-rate
+python -m src.music_sync --ip 192.168.1.4 --effect bass --rate 4.0 --adaptive-rate
 
 # Run in simulated DRY-RUN mode (zero network packets)
 python -m src.music_sync --dry-run --effect smooth --focus rhythm
@@ -232,7 +244,9 @@ Run the full automated test suite:
 .\.venv\Scripts\pytest -v
 ```
 
-### Complete Test Coverage (216 Passing Tests)
+### Complete Test Coverage (225 Passing Tests)
+- **`tests/test_beat_expiration.py` (4 tests):** Deterministic arrival offsets within interval, transient superseding, network delay expiration, and 50-interval timing simulation verifying 100% dispatch ratio on healthy timing.
+- **`tests/test_audio_eval_dataset.py` (5 tests):** 7-category comparative dataset evaluation (silence, acapella vocals, quiet drums, strong kicks, sustained 808 basslines, acoustic percussion, full instrumental) verifying percussion isolation and vocal rejection.
 - **`tests/test_audio_focus.py` (9 tests):** Multi-mode audio focus initialization, harmonic vocal floor subtraction, kick transient slope differentiation, beat preservation in scheduler, and adaptive update rate stepping.
 - **`tests/test_verification_defects.py` (4 tests):** Falsification tests ensuring vocal tones never trigger rhythm onset hits, sustained basslines do not trigger kick hits, and scheduler never drops transient beats on tick boundaries.
 - **`tests/test_lifecycle_and_thread_affinity.py` (10 tests):** Qt thread affinity verification, safe timer activation on GUI thread, async event loop shutdown, and race-free window close.

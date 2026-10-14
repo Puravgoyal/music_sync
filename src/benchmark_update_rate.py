@@ -1,18 +1,20 @@
 """WiZ Bulb Network Rate Benchmark Tool.
 
 Systematically measures achievable UDP command update rates, packet loss,
-and round-trip latency at 3.5, 4.0, 5.0, 6.0, 8.0, and 10.0 Hz against a physical WiZ bulb.
+and round-trip latency at 4.0, 5.0, 6.0, and 8.0 Hz against a physical WiZ bulb.
+Uses conservative, smooth lighting transitions and adequately sampled test runs.
 Safely captures and restores initial bulb state.
 """
 
 import argparse
 import asyncio
+import colorsys
 import json
 import logging
+from pathlib import Path
 import sys
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import List, Optional
 
 # Ensure project root is in sys.path
@@ -38,22 +40,24 @@ class RateBenchmarkResult:
     achieved_rate_hz: float
     success_rate_pct: float
     latency_min_ms: float
+    latency_p50_ms: float
     latency_avg_ms: float
-    latency_median_ms: float
     latency_p95_ms: float
     latency_max_ms: float
+    long_tail_count_250ms: int
+    long_tail_pct_250ms: float
     stable: bool
 
 
 async def run_benchmark(
     bulb_ip: str,
     rates: Optional[List[float]] = None,
-    test_duration_per_rate: float = 3.5,
+    test_duration_per_rate: float = 10.0,
     output_file: Optional[Path] = None,
 ) -> List[RateBenchmarkResult]:
     """Execute update rate benchmarks across specified frequencies."""
     if rates is None:
-        rates = [3.5, 4.0, 5.0, 6.0, 8.0, 10.0]
+        rates = [4.0, 5.0, 6.0, 8.0]
 
     controller = WizBulbController(ip=bulb_ip, timeout=1.5)
     logger.info("Connecting to WiZ bulb at %s...", bulb_ip)
@@ -73,39 +77,34 @@ async def run_benchmark(
 
     results: List[RateBenchmarkResult] = []
 
-    # Alternating test colors
-    colors = [
-        (255, 60, 60),
-        (60, 255, 60),
-        (60, 60, 255),
-        (255, 200, 50),
-        (200, 60, 255),
-    ]
-
-    print(f"\n=======================================================")
-    print(f"  WiZ UDP Update Rate Benchmark: {bulb_ip}")
-    print(f"  Testing rates: {rates} Hz")
-    print(f"=======================================================\n")
+    print(f"\n==========================================================================================")
+    print(f"  WiZ UDP Update Rate Benchmark (Adequately Sampled: {test_duration_per_rate}s / tier)")
+    print(f"  Target Rates: {rates} Hz | Smooth Transitions | Bulb IP: {bulb_ip}")
+    print(f"==========================================================================================\n")
 
     try:
         for target_hz in rates:
-            logger.info("Benchmarking target rate: %.1f Hz...", target_hz)
+            logger.info("Benchmarking target rate: %.1f Hz for %.1f s...", target_hz, test_duration_per_rate)
             interval = 1.0 / target_hz
             end_time = time.perf_counter() + test_duration_per_rate
 
             latencies_ms: List[float] = []
             succeeded = 0
             failed = 0
-            color_idx = 0
+            step_idx = 0
             t_start = time.perf_counter()
 
             while time.perf_counter() < end_time:
                 t_dispatch = time.perf_counter()
-                r, g, b = colors[color_idx % len(colors)]
-                color_idx += 1
+
+                # Conservative, smooth lighting transitions (gentle HSV hue modulation)
+                hue = (step_idx * 0.035) % 1.0
+                step_idx += 1
+                r_f, g_f, b_f = colorsys.hsv_to_rgb(hue, 0.60, 0.55)
+                r, g, b = int(r_f * 255), int(g_f * 255), int(b_f * 255)
 
                 try:
-                    await controller.set_light_state(r=r, g=g, b=b, brightness=200, timeout=1.2)
+                    await controller.set_light_state(r=r, g=g, b=b, brightness=140, timeout=1.2)
                     duration_ms = (time.perf_counter() - t_dispatch) * 1000.0
                     latencies_ms.append(duration_ms)
                     succeeded += 1
@@ -126,15 +125,28 @@ async def run_benchmark(
 
             if latencies_ms:
                 l_min = float(np.min(latencies_ms))
+                l_p50 = float(np.median(latencies_ms))
                 l_avg = float(np.mean(latencies_ms))
-                l_med = float(np.median(latencies_ms))
                 l_p95 = float(np.percentile(latencies_ms, 95))
                 l_max = float(np.max(latencies_ms))
+                long_tail_count = sum(1 for d in latencies_ms if d > 250.0)
+                long_tail_pct = (long_tail_count / len(latencies_ms)) * 100.0
             else:
-                l_min = l_avg = l_med = l_p95 = l_max = 0.0
+                l_min = l_p50 = l_avg = l_p95 = l_max = 0.0
+                long_tail_count = 0
+                long_tail_pct = 0.0
 
-            # Stability criteria: >= 92% success and p95 latency < 120ms
-            is_stable = (success_pct >= 92.0) and (l_p95 < 120.0)
+            # Rigorous Stability criteria:
+            # 1. Packet success rate >= 95.0%
+            # 2. Achieved rate within 12% of target rate
+            # 3. p95 latency < 250 ms (predictable bounded delivery)
+            # 4. Long tail delays (> 250ms) < 5.0%
+            is_stable = (
+                (success_pct >= 95.0)
+                and (achieved_rate >= 0.88 * target_hz)
+                and (l_p95 < 250.0)
+                and (long_tail_pct < 5.0)
+            )
 
             res = RateBenchmarkResult(
                 target_rate_hz=target_hz,
@@ -145,23 +157,28 @@ async def run_benchmark(
                 achieved_rate_hz=round(achieved_rate, 2),
                 success_rate_pct=round(success_pct, 1),
                 latency_min_ms=round(l_min, 1),
+                latency_p50_ms=round(l_p50, 1),
                 latency_avg_ms=round(l_avg, 1),
-                latency_median_ms=round(l_med, 1),
                 latency_p95_ms=round(l_p95, 1),
                 latency_max_ms=round(l_max, 1),
+                long_tail_count_250ms=long_tail_count,
+                long_tail_pct_250ms=round(long_tail_pct, 1),
                 stable=is_stable,
             )
             results.append(res)
             logger.info(
-                "Result %.1f Hz: Achieved %.1f Hz | Success: %.1f%% | p95 Latency: %.1f ms | Stable: %s",
+                "Result %.1f Hz: Achieved %.2f Hz | Success: %.1f%% | p50: %.1f ms | p95: %.1f ms | Long-tail (>250ms): %d (%.1f%%) | Stable: %s",
                 target_hz,
                 achieved_rate,
                 success_pct,
+                l_p50,
                 l_p95,
+                long_tail_count,
+                long_tail_pct,
                 is_stable,
             )
-            # Brief cooldown between rate tiers
-            await asyncio.sleep(0.5)
+            # Brief cooldown between rate tiers to let bulb network queue clear
+            await asyncio.sleep(1.0)
 
     finally:
         # Restore pre-benchmark bulb state
@@ -176,13 +193,13 @@ async def run_benchmark(
         await controller.disconnect()
 
     # Print summary table
-    print("\n" + "=" * 90)
-    print(f"{'Target (Hz)':<12} {'Achieved (Hz)':<14} {'Success %':<12} {'Avg Lat (ms)':<14} {'p95 Lat (ms)':<14} {'Stable?':<10}")
-    print("-" * 90)
+    print("\n" + "=" * 115)
+    print(f"{'Target (Hz)':<12} {'Achieved (Hz)':<14} {'Success %':<12} {'p50 Lat (ms)':<14} {'p95 Lat (ms)':<14} {'Tail >250ms %':<16} {'Stable?':<12}")
+    print("-" * 115)
     for r in results:
-        stable_str = "YES" if r.stable else "NO (Degraded)"
-        print(f"{r.target_rate_hz:<12.1f} {r.achieved_rate_hz:<14.2f} {r.success_rate_pct:<12.1f} {r.latency_avg_ms:<14.1f} {r.latency_p95_ms:<14.1f} {stable_str:<10}")
-    print("=" * 90 + "\n")
+        stable_str = "YES (Reliable)" if r.stable else "NO (Degraded)"
+        print(f"{r.target_rate_hz:<12.1f} {r.achieved_rate_hz:<14.2f} {r.success_rate_pct:<12.1f} {r.latency_p50_ms:<14.1f} {r.latency_p95_ms:<14.1f} {r.long_tail_pct_250ms:<16.1f} {stable_str:<12}")
+    print("=" * 115 + "\n")
 
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
@@ -195,7 +212,7 @@ async def run_benchmark(
 def main():
     parser = argparse.ArgumentParser(description="WiZ Bulb Update Rate Benchmark")
     parser.add_argument("--ip", type=str, default="192.168.1.4", help="Bulb IP address (default: 192.168.1.4)")
-    parser.add_argument("--duration", type=float, default=3.0, help="Test duration per rate in seconds (default: 3.0)")
+    parser.add_argument("--duration", type=float, default=10.0, help="Test duration per rate in seconds (default: 10.0)")
     parser.add_argument("--out", type=str, default="rate_benchmark_results.json", help="Output JSON results path")
     args = parser.parse_args()
 

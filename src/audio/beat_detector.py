@@ -46,9 +46,9 @@ class BeatDetectorConfig:
     treble_weight: float = 0.5
 
     # Rhythm Focus (percussion & vocal suppression) parameters
-    rhythm_threshold_multiplier: float = 1.40
-    rhythm_refractory_frames: int = 3  # ~64ms cooldown for fast percussive hits
-    rhythm_min_threshold: float = 0.012
+    rhythm_threshold_multiplier: float = 1.45
+    rhythm_refractory_frames: int = 4  # ~85ms cooldown matching musical transient rate
+    rhythm_min_threshold: float = 0.015
     harmonic_smoothing: float = 0.88  # Running background spectrum factor for harmonic suppression
 
     # Kick Focus parameters (40 - 180 Hz)
@@ -303,13 +303,13 @@ class BeatDetector:
             p_diff = percussive.copy()
         self._prev_percussive_spectrum = percussive.copy()
 
-        # Frequency weighting targeting percussion while suppressing vocal formant band (250 - 1400 Hz)
+        # Frequency weighting targeting percussion while suppressing vocal formant band (200 - 2500 Hz)
         if freq_bins is not None and len(freq_bins) == len(current):
             w = np.ones_like(current)
             w[freq_bins < 200.0] = 1.8  # Kicks
-            w[(freq_bins >= 200.0) & (freq_bins < 1400.0)] = 0.22  # Strongly suppress vocal fundamentals & F1
-            w[(freq_bins >= 1400.0) & (freq_bins < 5500.0)] = 1.6  # Snares, claps, rimshots
-            w[freq_bins >= 5500.0] = 1.3  # Hi-hats, cymbals, crisp transients
+            w[(freq_bins >= 200.0) & (freq_bins < 2500.0)] = 0.20  # Strongly suppress vocal fundamentals & formants (F1, F2)
+            w[(freq_bins >= 2500.0) & (freq_bins < 6000.0)] = 1.6  # Snares, claps, rimshots
+            w[freq_bins >= 6000.0] = 1.3  # Hi-hats, cymbals, crisp transients
             p_diff *= w
 
         rhythm_flux = float(np.sum(p_diff))
@@ -352,12 +352,22 @@ class BeatDetector:
         if freq_bins is None or len(freq_bins) != len(current):
             return False, 0.0, 0.0
 
+        self._frames_since_last_kick += 1
+
         kick_mask = (freq_bins >= self.config.kick_min_freq) & (freq_bins <= self.config.kick_max_freq)
         if not np.any(kick_mask):
             return False, 0.0, 0.0
 
         kick_mags = current[kick_mask]
         kick_energy = float(np.sqrt(np.mean(kick_mags ** 2)))
+
+        # Sub-bass concentration guard: kick hits have prominent 40-180 Hz energy (> 0.012).
+        # Rejects high-frequency percussion leakage and vocal harmonics without sub-bass presence.
+        if kick_energy < 0.012:
+            self._kick_flux_history.append(0.0)
+            self._prev_kick_spectrum = kick_mags.copy()
+            self._kick_energy_baseline = 0.0
+            return False, 0.0, 0.0
 
         if self._prev_kick_spectrum is None or len(self._prev_kick_spectrum) != len(kick_mags):
             self._prev_kick_spectrum = kick_mags.copy()
@@ -382,7 +392,6 @@ class BeatDetector:
         self._last_kick_flux = combined_kick_novelty
 
         self._kick_flux_history.append(combined_kick_novelty)
-        self._frames_since_last_kick += 1
 
         if len(self._kick_flux_history) >= 5:
             arr = np.array(self._kick_flux_history)

@@ -42,9 +42,17 @@ class SchedulerMetrics:
     applied_state: Optional[LightingState] = None
     is_dry_run: bool = False
     rate_hz: float = 4.0
+    target_rate_hz: float = 4.0
+    achieved_rate_hz: float = 0.0
     adaptive_rate: bool = False
+    p50_duration_ms: float = 0.0
     p95_duration_ms: float = 0.0
     consecutive_successes: int = 0
+    beats_received: int = 0
+    beats_dispatched: int = 0
+    beats_expired: int = 0
+    beats_superseded: int = 0
+    beat_dispatch_ratio: float = 1.0
 
 
 class BulbCommandScheduler:
@@ -72,8 +80,13 @@ class BulbCommandScheduler:
         dry_run: bool = False,
         adaptive_rate: bool = False,
         min_rate_hz: float = 3.5,
-        max_rate_hz: float = 8.0,
-        max_beat_age_s: float = 0.18,
+        max_rate_hz: float = 5.0,
+        max_beat_age_s: Optional[float] = None,
+        adaptation_cooldown_s: float = 4.0,
+        step_up_p95_ms: float = 115.0,
+        step_up_median_ms: float = 90.0,
+        step_down_p95_ms: float = 135.0,
+        step_up_consecutive_successes: int = 10,
     ) -> None:
         if not (1.0 <= rate_hz <= 10.0):
             raise ValueError(f"Rate must be between 1.0 and 10.0 Hz, got {rate_hz}")
@@ -87,7 +100,15 @@ class BulbCommandScheduler:
         self.adaptive_rate = adaptive_rate
         self.min_rate_hz = float(min_rate_hz)
         self.max_rate_hz = float(max_rate_hz)
-        self.max_beat_age_s = float(max_beat_age_s)
+        self.max_beat_age_s = float(max_beat_age_s) if max_beat_age_s is not None else None
+
+        # Calibrated adaptive rate parameters
+        self._adaptation_cooldown_s = float(adaptation_cooldown_s)
+        self.step_up_p95_ms = float(step_up_p95_ms)
+        self.step_up_median_ms = float(step_up_median_ms)
+        self.step_down_p95_ms = float(step_down_p95_ms)
+        self.step_up_consecutive_successes = int(step_up_consecutive_successes)
+        self._last_rate_change_time = 0.0
 
         self._pending_state: Optional[LightingState] = None
         self._pending_beat: Optional[BeatEvent] = None
@@ -105,9 +126,16 @@ class BulbCommandScheduler:
         self._consecutive_failures = 0
         self._consecutive_successes = 0
         self._last_duration_ms = 0.0
+        self._p50_duration_ms = 0.0
         self._p95_duration_ms = 0.0
         self._duration_history: Deque[float] = deque(maxlen=20)
         self._timestamp_history: Deque[float] = deque(maxlen=30)
+
+        # Beat event metrics
+        self._beats_received = 0
+        self._beats_dispatched = 0
+        self._beats_expired = 0
+        self._beats_superseded = 0
 
     @property
     def rate_hz(self) -> float:
@@ -118,6 +146,21 @@ class BulbCommandScheduler:
         if not (1.0 <= value <= 10.0):
             raise ValueError(f"Rate must be between 1.0 and 10.0 Hz, got {value}")
         self._rate_hz = float(value)
+
+    @property
+    def effective_max_beat_age(self) -> float:
+        """Dynamically calculated maximum beat event age for next-available-slot dispatch.
+
+        Balances musical timing, onset freshness, and rate-limited command intervals.
+        Ensures a beat occurring anywhere within the current tick interval is preserved
+        for dispatch at the next slot, while strictly expiring stale beats if network
+        delays or timeouts push execution beyond musical synchrony limits.
+        """
+        nominal_interval = 1.0 / self._rate_hz
+        calculated_age = min(0.35, max(0.20, nominal_interval * 1.25))
+        if self.max_beat_age_s is not None and self.max_beat_age_s > calculated_age:
+            return self.max_beat_age_s
+        return calculated_age
 
     @property
     def is_running(self) -> bool:
@@ -142,12 +185,20 @@ class BulbCommandScheduler:
         with self._state_lock:
             self._pending_state = state
             if is_beat:
+                self._beats_received += 1
+                effective_max_age = self.effective_max_beat_age
                 if (
                     self._pending_beat is None
-                    or (now - self._pending_beat.timestamp > self.max_beat_age_s)
-                    or beat_intensity >= self._pending_beat.intensity
+                    or (now - self._pending_beat.timestamp > effective_max_age)
                 ):
                     self._pending_beat = BeatEvent(timestamp=now, state=state, intensity=beat_intensity)
+                elif beat_intensity >= self._pending_beat.intensity:
+                    # Stronger beat supersedes previous pending beat within the same slot
+                    self._beats_superseded += 1
+                    self._pending_beat = BeatEvent(timestamp=now, state=state, intensity=beat_intensity)
+                else:
+                    # Weaker beat superseded by currently buffered stronger beat
+                    self._beats_superseded += 1
 
     async def start(self) -> None:
         """Start the rate-limited command dispatch worker loop."""
@@ -215,11 +266,23 @@ class BulbCommandScheduler:
         """Process a single rate-limited dispatch tick with beat preservation."""
         now = time.perf_counter()
         target: Optional[LightingState] = None
+        was_beat = False
         with self._state_lock:
+            effective_max_age = self.effective_max_beat_age
             # Check for fresh preserved beat event first
             if self._pending_beat is not None:
-                if (now - self._pending_beat.timestamp) <= self.max_beat_age_s:
+                beat_age = now - self._pending_beat.timestamp
+                if beat_age <= effective_max_age:
                     target = self._pending_beat.state
+                    was_beat = True
+                    self._beats_dispatched += 1
+                else:
+                    self._beats_expired += 1
+                    logger.debug(
+                        "Beat expired before dispatch slot (age: %.3f s > max: %.3f s)",
+                        beat_age,
+                        effective_max_age,
+                    )
                 self._pending_beat = None
 
             if target is None:
@@ -229,8 +292,8 @@ class BulbCommandScheduler:
         if target is None:
             return
 
-        # Deadband suppression: skip if perceptually identical to applied bulb state
-        if target.is_similar_to(
+        # Deadband suppression: skip non-beat dispatches if perceptually identical to applied bulb state
+        if not was_beat and target.is_similar_to(
             self._applied_state,
             rgb_threshold=self.rgb_threshold,
             brightness_threshold=self.brightness_threshold,
@@ -311,34 +374,70 @@ class BulbCommandScheduler:
 
         if len(self._duration_history) >= 5:
             sorted_durations = sorted(self._duration_history)
-            idx = int(0.95 * len(sorted_durations))
-            self._p95_duration_ms = sorted_durations[min(idx, len(sorted_durations) - 1)]
+            p50_idx = int(0.50 * len(sorted_durations))
+            p95_idx = int(0.95 * len(sorted_durations))
+            self._p50_duration_ms = sorted_durations[min(p50_idx, len(sorted_durations) - 1)]
+            self._p95_duration_ms = sorted_durations[min(p95_idx, len(sorted_durations) - 1)]
         else:
+            self._p50_duration_ms = duration_ms
             self._p95_duration_ms = duration_ms
 
     def _adapt_rate_on_success(self) -> None:
-        """Evaluate link conditions and step up or step down rate in adaptive mode."""
-        if self._consecutive_successes >= 10 and len(self._duration_history) >= 8:
-            if self._p95_duration_ms < 55.0 and self._rate_hz < self.max_rate_hz:
+        """Evaluate link conditions and step up or step down rate in adaptive mode with hysteresis."""
+        now = time.perf_counter()
+        if now - self._last_rate_change_time < self._adaptation_cooldown_s:
+            return
+
+        # Step DOWN if p95 latency exceeds high-latency threshold (175 ms)
+        if self._p95_duration_ms > self.step_down_p95_ms and self._rate_hz > self.min_rate_hz:
+            new_rate = max(self.min_rate_hz, round(self._rate_hz - 0.5, 1))
+            if new_rate != self._rate_hz:
+                logger.info(
+                    "Adaptive rate stepped DOWN due to high latency: %.1f Hz -> %.1f Hz (p95: %.1f ms > %.1f ms)",
+                    self._rate_hz,
+                    new_rate,
+                    self._p95_duration_ms,
+                    self.step_down_p95_ms,
+                )
+                self._rate_hz = new_rate
+                self._last_rate_change_time = now
+                self._consecutive_successes = 0
+            return
+
+        # Step UP requires sustained evidence: >= 16 consecutive successes, p95 <= 130 ms, p50 <= 95 ms
+        if (
+            self._consecutive_successes >= self.step_up_consecutive_successes
+            and len(self._duration_history) >= 12
+            and self._rate_hz < self.max_rate_hz
+        ):
+            if self._p95_duration_ms <= self.step_up_p95_ms and self._p50_duration_ms <= self.step_up_median_ms:
                 new_rate = min(self.max_rate_hz, round(self._rate_hz + 0.5, 1))
                 if new_rate != self._rate_hz:
-                    logger.info("Adaptive rate stepped UP: %.1f Hz -> %.1f Hz (p95: %.1f ms)", self._rate_hz, new_rate, self._p95_duration_ms)
+                    logger.info(
+                        "Adaptive rate stepped UP with sustained link quality: %.1f Hz -> %.1f Hz (p95: %.1f ms, p50: %.1f ms)",
+                        self._rate_hz,
+                        new_rate,
+                        self._p95_duration_ms,
+                        self._p50_duration_ms,
+                    )
                     self._rate_hz = new_rate
-                    self._consecutive_successes = 0
-            elif self._p95_duration_ms > 110.0 and self._rate_hz > self.min_rate_hz:
-                new_rate = max(self.min_rate_hz, round(self._rate_hz - 0.5, 1))
-                if new_rate != self._rate_hz:
-                    logger.info("Adaptive rate stepped DOWN due to latency: %.1f Hz -> %.1f Hz (p95: %.1f ms)", self._rate_hz, new_rate, self._p95_duration_ms)
-                    self._rate_hz = new_rate
+                    self._last_rate_change_time = now
                     self._consecutive_successes = 0
 
     def _adapt_rate_on_failure(self) -> None:
         """Immediately drop rate on transmission failure or timeout."""
+        now = time.perf_counter()
         if self._rate_hz > self.min_rate_hz:
             new_rate = max(self.min_rate_hz, round(self._rate_hz - 1.0, 1))
             if new_rate != self._rate_hz:
-                logger.warning("Adaptive rate stepped DOWN due to failure: %.1f Hz -> %.1f Hz", self._rate_hz, new_rate)
+                logger.warning(
+                    "Adaptive rate stepped DOWN due to failure: %.1f Hz -> %.1f Hz",
+                    self._rate_hz,
+                    new_rate,
+                )
                 self._rate_hz = new_rate
+                self._last_rate_change_time = now
+        self._consecutive_successes = 0
 
     def get_metrics(self) -> SchedulerMetrics:
         """Retrieve snapshot of scheduler metrics and performance."""
@@ -347,9 +446,9 @@ class BulbCommandScheduler:
         recent_timestamps = [t for t in self._timestamp_history if now - t <= 3.0]
         if len(recent_timestamps) >= 2:
             time_span = recent_timestamps[-1] - recent_timestamps[0]
-            rate = (len(recent_timestamps) - 1) / max(0.01, time_span)
+            achieved_rate = (len(recent_timestamps) - 1) / max(0.01, time_span)
         else:
-            rate = 0.0
+            achieved_rate = 0.0
 
         avg_dur = (
             sum(self._duration_history) / len(self._duration_history)
@@ -360,18 +459,29 @@ class BulbCommandScheduler:
         with self._state_lock:
             pending = self._pending_state
 
+        total_decided_beats = self._beats_dispatched + self._beats_expired
+        ratio = (self._beats_dispatched / total_decided_beats) if total_decided_beats > 0 else 1.0
+
         return SchedulerMetrics(
             commands_sent=self._commands_sent,
             commands_failed=self._commands_failed,
             consecutive_failures=self._consecutive_failures,
             last_command_duration_ms=self._last_duration_ms,
             average_duration_ms=avg_dur,
-            updates_per_second=rate,
+            updates_per_second=achieved_rate,
             pending_state=pending,
             applied_state=self._applied_state,
             is_dry_run=self.dry_run,
             rate_hz=self._rate_hz,
+            target_rate_hz=self._rate_hz,
+            achieved_rate_hz=round(achieved_rate, 2),
             adaptive_rate=self.adaptive_rate,
-            p95_duration_ms=self._p95_duration_ms,
+            p50_duration_ms=round(self._p50_duration_ms, 1),
+            p95_duration_ms=round(self._p95_duration_ms, 1),
             consecutive_successes=self._consecutive_successes,
+            beats_received=self._beats_received,
+            beats_dispatched=self._beats_dispatched,
+            beats_expired=self._beats_expired,
+            beats_superseded=self._beats_superseded,
+            beat_dispatch_ratio=round(ratio, 3),
         )
