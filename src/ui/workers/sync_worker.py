@@ -183,6 +183,8 @@ class SyncWorker(QObject):
         detect_black_bars: bool = True,
         hybrid_type: str = "cinematic",
         audio_contribution: float = 0.35,
+        hybrid_audio_focus: Optional[str] = None,
+        hybrid_beat_intensity: Optional[float] = None,
         custom_capture_backend=None,
     ) -> bool:
         """Start synchronization on the background asyncio engine for Music, Screen, or Hybrid mode.
@@ -239,6 +241,8 @@ class SyncWorker(QObject):
                     detect_black_bars=detect_black_bars,
                     hybrid_type=hybrid_type,
                     audio_contribution=audio_contribution,
+                    hybrid_audio_focus=hybrid_audio_focus,
+                    hybrid_beat_intensity=hybrid_beat_intensity,
                     custom_capture_backend=custom_capture_backend,
                 )
                 self._engine = engine
@@ -369,12 +373,16 @@ class SyncWorker(QObject):
         self,
         hybrid_type: Optional[str] = None,
         audio_contribution: Optional[float] = None,
+        audio_focus: Optional[str] = None,
+        beat_intensity: Optional[float] = None,
     ) -> None:
         """Update hybrid AV parameters dynamically. Thread-safe."""
         if self._engine:
             self._engine.set_hybrid_settings(
                 hybrid_type=hybrid_type,
                 audio_contribution=audio_contribution,
+                audio_focus=audio_focus,
+                beat_intensity=beat_intensity,
             )
 
     def get_telemetry_snapshot(

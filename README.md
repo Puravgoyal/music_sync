@@ -8,6 +8,7 @@
 - **Phase 4:** Polished PySide6 Windows desktop application, transactional startup rollback, accurate active lighting mode restoration, multithreaded async event loop bridge, local preferences persistence, and PyInstaller Windows executable packaging.
 - **Phase 4.3:** Enhanced beat detection & vocal suppression (Full Music, Rhythm Focus, Kick Focus), dual-resolution 2048-sample low-frequency FFT, latency-aware beat preservation, adaptive bulb update rate controller, and physical hardware rate benchmarking.
 - **Phase 5:** Screen Ambience (Ambilight) and Hybrid Audio/Video synchronization. Windows screen capture (Qt/DWM + DXcam fallbacks) with multi-monitor and DPI scaling awareness, linear sRGB color extraction (Average Screen Color, Dominant Color, Edge-Based Ambience), cinematic processing (black-bar letterbox/pillarbox detection, subtitle resistance, dark scene scaling, stale frame recovery), temporal circular hue smoothing, and Hybrid AV sync (video-driven RGB + audio-driven rhythmic/loudness brightness modulation) orchestrated under a unified synchronization engine.
+- **Phase 5.1:** Critical Screen Capture and Hybrid AV Reliability Fixes. Strict Qt GUI thread affinity for `QScreen.grabWindow` via thread-safe queued slots, Windows interactive desktop attachment (`ensure_default_desktop` to `WinSta0\Default`), DXcam trial grab with zero-delay fallback, capture health & stale-frame recovery (>1.2s timeout dispatches fallback while dark movie scenes remain healthy), dynamic Hybrid Audio Focus (`full`, `rhythm`, `kick`) and beat intensity propagation, thread-safe atomic hybrid fusion with beat de-duplication, and comprehensive verification across 7 real screen scenes and physical WiZ hardware.
 
 ---
 
@@ -35,8 +36,8 @@
 - **Supported Displays:** Single- and multi-monitor Windows setups with full DPI scaling awareness (100%, 125%, 150%, 200%).
 - **Multi-GPU / Hybrid Laptops:** Operates cleanly on systems with integrated Intel/AMD GPUs alongside dedicated NVIDIA GPUs without desktop duplication permission conflicts.
 - **Capture Backends:**
-  - `QtCaptureBackend` (Default / Recommended): Captures via Windows Desktop Window Manager (DWM) compositor at ~8.5 ms per frame, completely free of session lockouts and GPU vendor bugs.
-  - `DXCamCaptureBackend`: Optional high-speed DXGI Desktop Duplication backend for supported interactive sessions.
+  - `QtCaptureBackend` (Default / Recommended): Captures via Windows Desktop Window Manager (DWM) compositor with guaranteed main GUI thread affinity (`QtScreenGrabber` queued invocation), and interactive desktop station attachment (`ensure_default_desktop` via Win32 `OpenDesktopW`), operating at ~8.5 ms per frame with zero GPU vendor lockouts.
+  - `DXCamCaptureBackend`: High-speed DXGI Desktop Duplication backend featuring non-blocking trial grabs at startup with instant fallback to Qt capture if `cv2` or DXGI output duplication is unavailable.
   - `MockCaptureBackend`: Deterministic synthetic frame generator for automated headless CI/CD testing.
 
 ---
@@ -324,19 +325,19 @@ Run the full automated test suite:
 .\.venv\Scripts\pytest -v
 ```
 
-### Complete Test Coverage (265 Passing Tests)
+### Complete Test Coverage (276 Passing Tests)
 - **`tests/test_color_extraction.py` (9 tests):** Linear sRGB conversions, average color extraction with anti-gray saturation preservation, dominant color extraction with histogram binning and subtitle resistance, and directional perimeter slicing for edge ambience.
-- **`tests/test_smoothing.py` (7 tests):** Circular shortest-path hue wrapping across 0°/360° boundary, asymmetric attack/release brightness dynamics, scene cut acceleration, and preset configurations (Cinematic, Balanced, Responsive).
-- **`tests/test_screen_capture.py` (8 tests):** ScreenCaptureManager backend lifecycle, multi-monitor enumeration, DPI scaling awareness, frame downsampling to 64×36, black-bar letterbox/pillarbox detection and cropping, and capture fallback fadeout.
-- **`tests/test_hybrid_av.py` (7 tests):** HybridAVProcessor mode routing (Cinematic, Rhythm, Kick), video color dominance, audio loudness modulation, rhythm onset pulses, kick transients, and audio contribution weighting (0% to 100%).
-- **`tests/test_unified_sync_engine.py` (5 tests):** Unified engine mode transitions (MUSIC, SCREEN, HYBRID), single scheduler invariant enforcement, transactional startup rollback, and pre-sync state capture/restoration.
-- **`tests/test_screen_preferences.py` (4 tests):** Screen and Hybrid configuration schema serialization, JSON round-tripping, boundary clamping, and migration defaults.
+- **`tests/test_smoothing.py` (4 tests):** Circular shortest-path hue wrapping across 0°/360° boundary, asymmetric attack/release brightness dynamics, scene cut acceleration, and preset configurations (Cinematic, Balanced, Responsive).
+- **`tests/test_screen_capture.py` (11 tests):** ScreenCaptureManager backend lifecycle, multi-monitor enumeration, DPI scaling awareness, frame downsampling to 64×36, black-bar letterbox/pillarbox detection and cropping, capture fallback fadeout, Qt main GUI thread affinity verification, DXcam single initialization & trial grab fallback, static content health reporting, stale frame notification on prolonged failure (>1.2s), and dark cinematic frame health preservation.
+- **`tests/test_hybrid_av.py` (9 tests):** HybridAVProcessor mode routing (Cinematic, Rhythm, Kick), video color dominance, audio loudness modulation, rhythm onset pulses, kick transients, audio contribution weighting (0% to 100%), beat metric de-duplication (`id(metrics)`), 350 ms audio expiration decay, and concurrent multithreaded fusion thread safety.
+- **`tests/test_unified_sync_engine.py` (8 tests):** Unified engine mode transitions (MUSIC, SCREEN, HYBRID), single scheduler invariant enforcement, transactional startup rollback, pre-sync state capture/restoration, hybrid audio focus (`full`, `rhythm`, `kick`) and beat intensity dynamic propagation, and screen capture failure & recovery handling.
+- **`tests/test_screen_preferences.py` (4 tests):** Screen and Hybrid configuration schema serialization, JSON round-tripping, boundary clamping (including `hybrid_audio_focus` and `hybrid_beat_intensity`), and backward compatibility with Phase 4 preference files.
 - **`tests/test_beat_expiration.py` (4 tests):** Deterministic arrival offsets within interval, transient superseding, network delay expiration, and 50-interval timing simulation verifying 100% dispatch ratio on healthy timing.
 - **`tests/test_audio_eval_dataset.py` (5 tests):** 7-category comparative dataset evaluation (silence, acapella vocals, quiet drums, strong kicks, sustained 808 basslines, acoustic percussion, full instrumental) verifying percussion isolation and vocal rejection.
 - **`tests/test_audio_focus.py` (9 tests):** Multi-mode audio focus initialization, harmonic vocal floor subtraction, kick transient slope differentiation, beat preservation in scheduler, and adaptive update rate stepping.
 - **`tests/test_verification_defects.py` (4 tests):** Falsification tests ensuring vocal tones never trigger rhythm onset hits, sustained basslines do not trigger kick hits, and scheduler never drops transient beats on tick boundaries.
 - **`tests/test_lifecycle_and_thread_affinity.py` (10 tests):** Qt thread affinity verification, safe timer activation on GUI thread, async event loop shutdown, and race-free window close.
-- **`tests/test_ui.py` (7 tests):** DevicePanel selection, AudioPanel enumeration, EffectsPanel sliders, SpectrumView bars/beat flash, StatusPanel previews, MainWindow lifecycle, and rapid Start/Stop cycles.
+- **`tests/test_ui.py` (8 tests):** DevicePanel selection, AudioPanel enumeration, EffectsPanel sliders, SpectrumView bars/beat flash, StatusPanel previews, MainWindow lifecycle, rapid Start/Stop cycles, and Hybrid panel controls (audio focus combo, beat intensity slider, contribution slider) propagating to worker and preferences.
 - **`tests/test_preferences.py` (7 tests):** AppPreferences defaults, boundary clamping, atomic save/load roundtrips, corrupted JSON recovery, and forward schema compatibility.
 - **`tests/test_reliability.py` (9 tests):** Transactional startup rollback on controller error, scheduler error, audio device failure, clean retry, accurate restoration across Off/RGB/Colortemp/Scene/White modes, and concurrent thread-safety stress tests.
 - **`tests/test_packaging.py` (3 tests):** Bundled executable existence, binary size check, bundled dark theme stylesheet presence, `--version` CLI, and subprocess packaged GUI smoke test with diagnostic report verification.
@@ -350,3 +351,30 @@ Run the full automated test suite:
 - **`tests/test_controller.py` (11 tests):** WiZ controller commands, timeouts, and error mappings.
 - **`tests/test_discovery.py` (7 tests):** Broadcast UDP probe datagrams and echo rejection.
 - **`tests/test_validation.py` (55 tests):** IP, RGB, brightness, and Kelvin validation.
+
+---
+
+## 14. Phase 5.1 Real Screen & Physical Hardware Verification
+
+To thoroughly validate real-world operation without relying on mock synthetic frames, `scripts/verify_phase5_1.py` runs an end-to-end test against both the live Windows display and the physical WiZ bulb hardware (`192.168.1.4`):
+
+```powershell
+python scripts/verify_phase5_1.py --ip 192.168.1.4
+```
+
+### Part A: Real Desktop Screen Capture Fidelity
+A topmost, frameless calibration window renders 7 visual desktop patterns on screen and verifies live capture fidelity via `QtCaptureBackend`:
+1. **Solid Red:** Captured RGB `(255, 0, 0)`, Brightness `83`, Health `OK`.
+2. **Solid Green:** Captured RGB `(0, 255, 0)`, Brightness `197`, Health `OK`.
+3. **Solid Blue:** Captured RGB `(0, 0, 255)`, Brightness `45`, Health `OK`.
+4. **Warm Sunset:** Captured RGB `(255, 149, 0)`, Brightness `179`, Health `OK`.
+5. **Underwater Scene:** Captured RGB `(0, 142, 159)`, Brightness `138`, Health `OK`.
+6. **Dark Cinematic Letterbox:** Captured RGB `(13, 13, 19)`, Brightness `39`, Health `OK`. Confirms dark cinematic scenes remain healthy (`CaptureHealth.OK`) and do not trigger false stale-frame fallbacks.
+7. **Dynamic Moving Colors:** Captured RGB `(176, 212, 6)`, Brightness `203`, Health `OK`.
+8. **Stale Frame Fallback:** Stalling screen updates for >1.2s successfully transitions to warm ambient `(255, 214, 170)`.
+
+### Part B: Physical WiZ Hardware Synchronization
+- **Screen Sync Mode:** 6 lighting commands dispatched at 3.0 Hz, 0 failures, 41 frames analyzed at 11.4 FPS.
+- **Hybrid AV Sync Mode:** 8 lighting commands dispatched at 3.0 Hz with loopback audio beat fusion, 0 failures, 41 frames analyzed at 11.2 FPS.
+- **State Capture & Restoration:** Pre-sync state captured (`ON, rgb, Brightness 74/255, (0, 16, 82)`), and accurately restored after sync completion (`ON, rgb, Brightness 74/255, (0, 49, 255)`).
+- **Packaged Executable (`WiZMusicSync.exe`):** Verified via `--smoke-test` and `--hardware-test 192.168.1.4` across all 3 modes (Music, Screen, Hybrid) with 100% success and state restoration.

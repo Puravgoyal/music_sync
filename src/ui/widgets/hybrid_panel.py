@@ -19,6 +19,7 @@ class HybridPanel(QGroupBox):
     """Panel managing Hybrid AV synchronization parameters: video color + audio rhythm/loudness."""
 
     hybrid_settings_changed = Signal()
+    audio_focus_changed = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__("Hybrid Audio + Video Fusion Settings", parent)
@@ -62,7 +63,7 @@ class HybridPanel(QGroupBox):
         self.focus_combo.addItem("Full Music (All Bands & Onsets)", "full")
         self.focus_combo.addItem("Rhythm Focus (Drum & Percussion Isolation)", "rhythm")
         self.focus_combo.addItem("Kick Focus (Low-Frequency Bass Hits)", "kick")
-        self.focus_combo.currentIndexChanged.connect(lambda: self.hybrid_settings_changed.emit())
+        self.focus_combo.currentIndexChanged.connect(self._on_focus_changed)
 
         focus_layout.addWidget(focus_label)
         focus_layout.addWidget(self.focus_combo, stretch=2)
@@ -100,6 +101,10 @@ class HybridPanel(QGroupBox):
         sliders_grid.addWidget(self.beat_val, 1, 2)
 
         layout.addLayout(sliders_grid)
+
+    def _on_focus_changed(self) -> None:
+        self.hybrid_settings_changed.emit()
+        self.audio_focus_changed.emit(self.get_audio_focus())
 
     def _on_contrib_changed(self, val: int) -> None:
         self.contrib_val.setText(f"{val}%")

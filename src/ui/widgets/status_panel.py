@@ -228,10 +228,26 @@ class StatusPanel(QGroupBox):
         fps_str = ""
         if getattr(status, "sync_mode", "music") in ("screen", "hybrid"):
             fps = getattr(status, "screen_fps", 0.0)
-            fps_str = f"Capture: {fps:4.1f} FPS | "
+            backend = getattr(status, "capture_backend", "None")
+            health = getattr(status, "capture_health", "IDLE")
+            frames = getattr(status, "frames_analyzed", 0)
 
+            # Compact backend tag
+            short_b = "Qt" if "Qt" in backend else ("DXcam" if "DXcam" in backend else backend)
+            if health == "OK":
+                fps_str = f"Capture: {fps:4.1f} FPS ({short_b}) [OK] | Frames: {frames} | "
+            elif health == "STALE":
+                fps_str = f"Capture: STALE ({short_b}) [Fallback Active] | "
+            elif health == "DISCONNECTED":
+                fps_str = f"Capture: MONITOR DISCONNECTED | "
+            elif health == "ERROR":
+                fps_str = f"Capture: ERROR ({short_b}) | "
+            else:
+                fps_str = f"Capture: {health} | "
+
+        acked = max(0, status.commands_sent - status.commands_failed)
         self.telemetry_label.setText(
-            f"{fps_str}Rate: {status.updates_per_second:4.1f} Hz{mode_str} | "
-            f"Commands: {status.commands_sent} sent, {status.commands_failed} failed | "
+            f"{fps_str}Bulb: {status.updates_per_second:4.1f} Hz{mode_str} | "
+            f"Commands: {status.commands_sent} sent ({acked} acked), {status.commands_failed} failed | "
             f"Latency: {dur:4.1f} ms{p95_str}"
         )

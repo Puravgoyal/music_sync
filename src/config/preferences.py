@@ -41,6 +41,8 @@ class AppPreferences:
     detect_black_bars: bool = True
     hybrid_type: str = "cinematic"
     audio_contribution: float = 0.35
+    hybrid_audio_focus: str = "full"
+    hybrid_beat_intensity: float = 1.0
 
     def validate(self) -> None:
         """Validate and clamp settings to safe limits."""
@@ -73,6 +75,9 @@ class AppPreferences:
         if self.hybrid_type not in ("cinematic", "rhythm", "kick"):
             self.hybrid_type = "cinematic"
         self.audio_contribution = max(0.0, min(1.0, float(self.audio_contribution)))
+        if self.hybrid_audio_focus not in ("full", "rhythm", "kick"):
+            self.hybrid_audio_focus = "full"
+        self.hybrid_beat_intensity = max(0.0, min(2.0, float(self.hybrid_beat_intensity)))
 
 
 def get_preferences_path() -> Path:

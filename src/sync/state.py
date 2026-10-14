@@ -107,6 +107,8 @@ class SyncStatus:
     screen_color: Optional[Tuple[int, int, int]] = None
     screen_monitor: Optional[str] = None
     capture_health: str = "OK"
+    capture_backend: str = "None"
+    frames_analyzed: int = 0
 
 
 from enum import Enum

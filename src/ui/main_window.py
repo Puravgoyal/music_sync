@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
 
         # Hybrid Panel signals
         self.hybrid_panel.hybrid_settings_changed.connect(self._on_hybrid_settings_changed)
+        self.hybrid_panel.audio_focus_changed.connect(self._on_hybrid_audio_focus_changed)
 
         # Status Panel signals
         self.status_panel.start_clicked.connect(self._on_start_sync)
@@ -227,8 +228,8 @@ class MainWindow(QMainWindow):
         # Hybrid settings
         self.hybrid_panel.set_hybrid_type(getattr(self.prefs, "hybrid_type", "cinematic"))
         self.hybrid_panel.set_audio_contribution(getattr(self.prefs, "audio_contribution", 0.35))
-        self.hybrid_panel.set_beat_intensity(self.prefs.beat_strength)
-        self.hybrid_panel.set_audio_focus(getattr(self.prefs, "audio_focus", "full"))
+        self.hybrid_panel.set_beat_intensity(getattr(self.prefs, "hybrid_beat_intensity", 1.0))
+        self.hybrid_panel.set_audio_focus(getattr(self.prefs, "hybrid_audio_focus", "full"))
 
         # Effects and Sliders
         self.effects_panel.set_selected_effect(self.prefs.preferred_effect)
@@ -270,6 +271,8 @@ class MainWindow(QMainWindow):
 
         self.prefs.hybrid_type = self.hybrid_panel.get_hybrid_type()
         self.prefs.audio_contribution = self.hybrid_panel.get_audio_contribution()
+        self.prefs.hybrid_audio_focus = self.hybrid_panel.get_audio_focus()
+        self.prefs.hybrid_beat_intensity = self.hybrid_panel.get_beat_intensity()
 
         self.prefs.preferred_effect = self.effects_panel.get_selected_effect()
         settings = self.effects_panel.get_settings()
@@ -356,10 +359,29 @@ class MainWindow(QMainWindow):
         )
 
     def _on_hybrid_settings_changed(self) -> None:
+        h_type = self.hybrid_panel.get_hybrid_type()
+        h_contrib = self.hybrid_panel.get_audio_contribution()
+        h_focus = self.hybrid_panel.get_audio_focus()
+        h_beat = self.hybrid_panel.get_beat_intensity()
+
+        self.prefs.hybrid_type = h_type
+        self.prefs.audio_contribution = h_contrib
+        self.prefs.hybrid_audio_focus = h_focus
+        self.prefs.hybrid_beat_intensity = h_beat
+
         self.worker.set_hybrid_settings(
-            hybrid_type=self.hybrid_panel.get_hybrid_type(),
-            audio_contribution=self.hybrid_panel.get_audio_contribution(),
+            hybrid_type=h_type,
+            audio_contribution=h_contrib,
+            audio_focus=h_focus,
+            beat_intensity=h_beat,
         )
+
+    def _on_hybrid_audio_focus_changed(self, focus: str) -> None:
+        self.prefs.hybrid_audio_focus = focus
+        cur_mode = str(self.source_combo.currentData() or "music")
+        if cur_mode == "hybrid":
+            self.worker.set_audio_focus(focus)
+            self.statusBar.showMessage(f"Hybrid Audio focus: {focus.capitalize()}", 3000)
 
     def _on_audio_focus_changed(self, focus: str) -> None:
         self.prefs.audio_focus = focus
@@ -401,8 +423,14 @@ class MainWindow(QMainWindow):
         effect_name = self.effects_panel.get_selected_effect()
         settings = self.effects_panel.get_settings()
         restore_state = self.status_panel.restore_chk.isChecked()
-        audio_focus = self.effects_panel.get_audio_focus()
         adaptive_rate = self.effects_panel.get_adaptive_rate()
+
+        if mode == "hybrid":
+            audio_focus = self.hybrid_panel.get_audio_focus()
+            h_beat = self.hybrid_panel.get_beat_intensity()
+        else:
+            audio_focus = self.effects_panel.get_audio_focus()
+            h_beat = self.effects_panel.get_settings().beat_strength
 
         # Update brightness from screen panel if screen/hybrid mode
         if mode in ("screen", "hybrid"):
@@ -436,6 +464,8 @@ class MainWindow(QMainWindow):
             detect_black_bars=self.screen_panel.get_detect_black_bars(),
             hybrid_type=self.hybrid_panel.get_hybrid_type(),
             audio_contribution=self.hybrid_panel.get_audio_contribution(),
+            hybrid_audio_focus=self.hybrid_panel.get_audio_focus(),
+            hybrid_beat_intensity=h_beat,
         )
 
     def _on_stop_sync(self) -> None:

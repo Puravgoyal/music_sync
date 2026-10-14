@@ -15,6 +15,7 @@ if str(root_dir) not in sys.path:
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from src.screen.capture import ensure_default_desktop
 from src.sync.state import RestorationResult
 from src.ui.main_window import MainWindow
 from src.ui.workers.sync_worker import SyncState
@@ -67,6 +68,7 @@ def run_gui_smoke_test(diag_file: Optional[Path] = None) -> int:
     }
 
     try:
+        ensure_default_desktop()
         QApplication.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
@@ -156,6 +158,7 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
     }
 
     try:
+        ensure_default_desktop()
         app = QApplication.instance()
         if app is None:
             app = QApplication(sys.argv if sys.argv else ["WiZMusicSync"])
@@ -292,7 +295,7 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
         assert frames_proc > 0, f"No audio frames were processed during sync (frames: {frames_proc})"
         assert cmds_sent > 0, f"No WiZ network commands were sent during sync (commands: {cmds_sent})"
 
-        # Stop sync
+        # Stop Music sync
         stop_audio.set()
         window._on_stop_sync()
         t_wait_stop = time.perf_counter()
@@ -302,8 +305,75 @@ def run_gui_hardware_test(target_ip: str, diag_file: Optional[Path] = None, run_
             if window.worker.state == SyncState.IDLE:
                 diagnostics["sync_stopped"] = True
                 break
-
         assert window.worker.state == SyncState.IDLE, "Worker failed to return to IDLE state"
+
+        # Phase 2: Screen Sync Mode
+        screen_idx = window.source_combo.findData("screen")
+        if screen_idx >= 0:
+            window.source_combo.setCurrentIndex(screen_idx)
+        window._on_start_sync()
+        t_wait_scr = time.perf_counter()
+        while time.perf_counter() - t_wait_scr < 6.0:
+            app.processEvents()
+            time.sleep(0.05)
+            if window.worker.state == SyncState.RUNNING:
+                diagnostics["screen_sync_started"] = True
+                break
+        assert window.worker.state == SyncState.RUNNING, "Worker failed to reach RUNNING state in Screen mode"
+
+        t_scr_run = time.perf_counter()
+        while time.perf_counter() - t_scr_run < 3.0:
+            app.processEvents()
+            time.sleep(0.05)
+
+        scr_status, _, _ = window.worker.get_telemetry_snapshot()
+        diagnostics["screen_frames_analyzed"] = scr_status.frames_analyzed if scr_status else 0
+        diagnostics["screen_commands_sent"] = scr_status.commands_sent if scr_status else 0
+        assert (scr_status and scr_status.commands_sent > 0), "No commands sent in Screen mode"
+
+        window._on_stop_sync()
+        t_wait_stop = time.perf_counter()
+        while time.perf_counter() - t_wait_stop < 5.0:
+            app.processEvents()
+            time.sleep(0.05)
+            if window.worker.state == SyncState.IDLE:
+                break
+        assert window.worker.state == SyncState.IDLE
+
+        # Phase 3: Hybrid AV Sync Mode
+        hyb_idx = window.source_combo.findData("hybrid")
+        if hyb_idx >= 0:
+            window.source_combo.setCurrentIndex(hyb_idx)
+        window.hybrid_panel.set_audio_focus("kick")
+        window.hybrid_panel.set_beat_intensity(1.8)
+        window._on_start_sync()
+        t_wait_hyb = time.perf_counter()
+        while time.perf_counter() - t_wait_hyb < 6.0:
+            app.processEvents()
+            time.sleep(0.05)
+            if window.worker.state == SyncState.RUNNING:
+                diagnostics["hybrid_sync_started"] = True
+                break
+        assert window.worker.state == SyncState.RUNNING, "Worker failed to reach RUNNING state in Hybrid mode"
+
+        t_hyb_run = time.perf_counter()
+        while time.perf_counter() - t_hyb_run < 3.0:
+            app.processEvents()
+            time.sleep(0.05)
+
+        hyb_status, _, _ = window.worker.get_telemetry_snapshot()
+        diagnostics["hybrid_frames_analyzed"] = hyb_status.frames_analyzed if hyb_status else 0
+        diagnostics["hybrid_commands_sent"] = hyb_status.commands_sent if hyb_status else 0
+        assert (hyb_status and hyb_status.commands_sent > 0), "No commands sent in Hybrid mode"
+
+        window._on_stop_sync()
+        t_wait_stop = time.perf_counter()
+        while time.perf_counter() - t_wait_stop < 5.0:
+            app.processEvents()
+            time.sleep(0.05)
+            if window.worker.state == SyncState.IDLE:
+                break
+        assert window.worker.state == SyncState.IDLE
 
         resto = window.worker.last_restoration_report
         assert resto is not None and resto.result == RestorationResult.SUCCESS, f"Restoration report indicated non-success: {resto}"

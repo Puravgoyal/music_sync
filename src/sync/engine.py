@@ -68,6 +68,8 @@ class MusicSyncEngine:
         detect_black_bars: bool = True,
         hybrid_type: str = "cinematic",
         audio_contribution: float = 0.35,
+        hybrid_audio_focus: Optional[str | AudioFocus] = None,
+        hybrid_beat_intensity: Optional[float] = None,
         screen_capture_fps: float = 12.0,
         custom_capture_backend: Optional[BaseCaptureBackend] = None,
     ) -> None:
@@ -127,13 +129,27 @@ class MusicSyncEngine:
             ht = HybridType(self.hybrid_type.lower())
         except Exception:
             ht = HybridType.CINEMATIC
+
+        if hybrid_audio_focus is not None:
+            try:
+                h_af = AudioFocus(hybrid_audio_focus.lower() if isinstance(hybrid_audio_focus, str) else hybrid_audio_focus)
+            except Exception:
+                h_af = self.audio_focus
+            if self.sync_mode in (SyncMode.HYBRID, "hybrid"):
+                self.audio_focus = h_af
+                self.settings.audio_focus = h_af
+        else:
+            h_af = self.audio_focus
+
+        h_beat = hybrid_beat_intensity if hybrid_beat_intensity is not None else self.settings.beat_strength
+
         hybrid_settings = HybridAVSettings(
             hybrid_type=ht,
             audio_contribution=self.audio_contribution,
-            beat_intensity=self.settings.beat_strength,
+            beat_intensity=h_beat,
             min_brightness=self.settings.min_brightness,
             max_brightness=self.settings.max_brightness,
-            audio_focus=self.audio_focus,
+            audio_focus=h_af,
         )
         self._hybrid_processor = HybridAVProcessor(settings=hybrid_settings)
 
@@ -293,6 +309,8 @@ class MusicSyncEngine:
         self,
         hybrid_type: Optional[str] = None,
         audio_contribution: Optional[float] = None,
+        audio_focus: Optional[str | AudioFocus] = None,
+        beat_intensity: Optional[float] = None,
     ) -> None:
         """Update hybrid AV parameters on the fly."""
         if hybrid_type is not None:
@@ -304,7 +322,22 @@ class MusicSyncEngine:
         if audio_contribution is not None:
             self.audio_contribution = max(0.0, min(1.0, float(audio_contribution)))
             self._hybrid_processor.settings.audio_contribution = self.audio_contribution
-        logger.info("Updated hybrid settings: type=%s, contrib=%.2f", self.hybrid_type, self.audio_contribution)
+        if audio_focus is not None:
+            try:
+                af = AudioFocus(audio_focus.lower() if isinstance(audio_focus, str) else audio_focus)
+            except Exception:
+                af = AudioFocus.FULL_MUSIC
+            self.set_audio_focus(af)
+            self._hybrid_processor.settings.audio_focus = af
+        if beat_intensity is not None:
+            self._hybrid_processor.settings.beat_intensity = max(0.0, min(2.0, float(beat_intensity)))
+        logger.info(
+            "Updated hybrid settings: type=%s, contrib=%.2f, focus=%s, beat_int=%.2f",
+            self.hybrid_type,
+            self.audio_contribution,
+            getattr(self.audio_focus, "value", self.audio_focus),
+            self._hybrid_processor.settings.beat_intensity,
+        )
 
     def set_adaptive_rate(self, enabled: bool) -> None:
         """Toggle adaptive update rate mode on the fly."""
@@ -459,11 +492,8 @@ class MusicSyncEngine:
                     self._scheduler.submit(target_state, is_beat=False, beat_intensity=0.0)
 
             elif self.sync_mode == SyncMode.HYBRID:
-                with self._state_lock:
-                    cur_metrics = self._last_metrics
-
-                fused_state, is_beat, beat_str = self._hybrid_processor.process(
-                    target_state, cur_metrics, timestamp
+                fused_state, is_beat, beat_str = self._hybrid_processor.fuse_video(
+                    target_state, timestamp
                 )
 
                 with self._state_lock:
@@ -504,18 +534,19 @@ class MusicSyncEngine:
                     self._scheduler.submit(target_state, is_beat=is_beat, beat_intensity=beat_str)
 
             elif self.sync_mode == SyncMode.HYBRID:
-                with self._state_lock:
-                    video_state = self._last_video_state
-
-                fused_state, is_beat, beat_str = self._hybrid_processor.process(
-                    video_state, metrics, now
+                fused_state, is_beat, beat_str = self._hybrid_processor.fuse_audio(
+                    metrics, now
                 )
 
                 with self._state_lock:
                     self._last_target_state = fused_state
 
                 if self._scheduler:
-                    self._scheduler.submit(fused_state, is_beat=is_beat, beat_intensity=beat_str)
+                    h_type = self._hybrid_processor.settings.hybrid_type
+                    h_val = getattr(h_type, "value", str(h_type))
+                    # Only dispatch to scheduler on a beat hit or in cinematic loudness mode
+                    if is_beat or h_val == "cinematic":
+                        self._scheduler.submit(fused_state, is_beat=is_beat, beat_intensity=beat_str)
 
         except Exception as exc:
             logger.error("Error processing audio frame in effect: %s", exc, exc_info=True)
@@ -617,8 +648,15 @@ class MusicSyncEngine:
         mon_name = self._selected_monitor.name if self._selected_monitor else None
 
         screen_fps = 0.0
+        backend_name = "None"
+        frames_count = 0
+        health_status = "IDLE"
+
         if self._screen_capture:
             screen_fps = self._screen_capture.stats.actual_fps
+            backend_name = self._screen_capture.stats.backend_name
+            frames_count = self._screen_capture.stats.frames_captured
+            health_status = self._screen_capture.health.name
 
         return SyncStatus(
             is_running=self._is_running,
@@ -640,7 +678,9 @@ class MusicSyncEngine:
             screen_fps=screen_fps,
             screen_color=raw_rgb,
             screen_monitor=mon_name,
-            capture_health="OK" if self._screen_capture and self._screen_capture.is_running else "IDLE",
+            capture_health=health_status,
+            capture_backend=backend_name,
+            frames_analyzed=frames_count,
         )
 
 

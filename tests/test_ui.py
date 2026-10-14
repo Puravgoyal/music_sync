@@ -167,3 +167,51 @@ def test_rapid_start_stop_transitions(mock_discover, qtbot, dummy_preferences) -
 
     assert window.status_panel.toggle_btn.isEnabled()
     assert window.device_panel.device_combo.isEnabled()
+
+
+@patch("src.ui.workers.sync_worker.discover_devices")
+def test_hybrid_panel_controls_propagate_to_worker_and_preferences(mock_discover, qtbot, dummy_preferences) -> None:
+    mock_discover.return_value = []
+    window = MainWindow(prefs_manager=dummy_preferences)
+    qtbot.addWidget(window)
+
+    window.worker.set_hybrid_settings = MagicMock()
+    window.worker.set_audio_focus = MagicMock()
+    window.worker.start_sync = MagicMock()
+
+    # Switch to Hybrid mode
+    idx = window.source_combo.findData("hybrid")
+    window.source_combo.setCurrentIndex(idx)
+    assert window.prefs.sync_mode == "hybrid"
+
+    # Change hybrid focus to 'kick'
+    focus_idx = window.hybrid_panel.focus_combo.findData("kick")
+    window.hybrid_panel.focus_combo.setCurrentIndex(focus_idx)
+
+    assert window.prefs.hybrid_audio_focus == "kick"
+    window.worker.set_audio_focus.assert_called_with("kick")
+    window.worker.set_hybrid_settings.assert_called()
+    call_args = window.worker.set_hybrid_settings.call_args[1]
+    assert call_args["audio_focus"] == "kick"
+
+    # Change beat intensity slider (value 18 = 1.8x)
+    window.hybrid_panel.beat_slider.setValue(18)
+    assert window.prefs.hybrid_beat_intensity == pytest.approx(1.8, 0.05)
+    call_args = window.worker.set_hybrid_settings.call_args[1]
+    assert call_args["beat_intensity"] == pytest.approx(1.8, 0.05)
+
+    # Change audio contribution slider (value 60 = 0.60)
+    window.hybrid_panel.contrib_slider.setValue(60)
+    assert window.prefs.audio_contribution == pytest.approx(0.60, 0.05)
+    call_args = window.worker.set_hybrid_settings.call_args[1]
+    assert call_args["audio_contribution"] == pytest.approx(0.60, 0.05)
+
+    # Trigger start_sync in hybrid mode and verify worker.start_sync receives hybrid focus and beat
+    window.status_panel.start_clicked.emit()
+    window.worker.start_sync.assert_called_once()
+    start_kwargs = window.worker.start_sync.call_args[1]
+    assert start_kwargs["sync_mode"] == "hybrid"
+    assert start_kwargs["audio_focus"] == "kick"
+    assert start_kwargs["hybrid_audio_focus"] == "kick"
+    assert start_kwargs["hybrid_beat_intensity"] == pytest.approx(1.8, 0.05)
+

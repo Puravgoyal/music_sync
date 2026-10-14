@@ -122,3 +122,109 @@ class TestCaptureFallbackManager:
         assert is_fallback
         assert rgb_decayed == (255, 200, 150)
         assert b_decayed == 25
+
+
+class TestReliabilityAndThreadAffinity:
+    """Targeted reliability tests for Qt thread affinity, single init, fallback, and black frames."""
+
+    def test_qt_screen_capture_thread_affinity(self, qapp) -> None:
+        """Verify QScreen.grabWindow executes strictly on the Qt GUI/main thread."""
+        import threading
+        from src.screen.capture import QtCaptureBackend
+
+        backend = QtCaptureBackend()
+        assert backend.start(monitor_index=0)
+
+        # Grab frame
+        frame = backend.grab_frame(downsample_size=(64, 36))
+        assert frame is not None
+        assert frame.shape == (36, 64, 3)
+
+        # Thread check: must match GUI thread where qapp runs
+        gui_thread_id = threading.get_ident()
+        assert backend.last_grab_thread_id is not None
+        assert backend.last_grab_thread_id == gui_thread_id
+
+        backend.stop()
+
+    def test_dxcam_single_initialization_and_fallback(self) -> None:
+        """Verify DXcam is initialized once and falls back cleanly without double init."""
+        from unittest.mock import patch
+        from src.screen.capture import BackendState, DXCamCaptureBackend, QtCaptureBackend, ScreenCaptureManager
+
+        init_counter = {"count": 0}
+
+        def mock_dxcam_start(self, monitor_index=0):
+            init_counter["count"] += 1
+            return False  # Simulate failure
+
+        with patch.object(DXCamCaptureBackend, "start", mock_dxcam_start):
+            mgr = ScreenCaptureManager(preferred_backend="auto")
+            assert mgr.start()
+            # DXcam should have been tried exactly once
+            assert init_counter["count"] == 1
+            # Fallback to QtCaptureBackend succeeded
+            assert isinstance(mgr.backend, QtCaptureBackend)
+            assert mgr.state == BackendState.RUNNING
+            mgr.stop()
+
+    def test_unchanged_frames_handled_as_healthy_static_content(self) -> None:
+        """Verify static screen content is not classified as an error."""
+        from src.screen.capture import FrameStatus
+
+        mock_backend = MockCaptureBackend(initial_frame=np.full((36, 64, 3), [10, 20, 30], dtype=np.uint8))
+        mgr = ScreenCaptureManager(
+            target_fps=20.0,
+            downsample_size=(64, 36),
+            custom_backend=mock_backend,
+        )
+        assert mgr.start()
+        time.sleep(0.08)
+
+        # Now simulate screen static (frame=None, last_status=UNCHANGED)
+        mock_backend.set_frame(None)
+        mock_backend.last_status = FrameStatus.UNCHANGED
+        time.sleep(0.12)
+
+        assert mgr.health == CaptureHealth.OK
+        mgr.stop()
+
+    def test_stale_frame_notification_on_prolonged_failure(self) -> None:
+        """Verify missing frames for > stale_timeout_s dispatches None to trigger analyzer fallback."""
+        from src.screen.capture import FrameStatus
+
+        none_received = []
+
+        def on_frame(f, ts):
+            if f is None:
+                none_received.append(ts)
+
+        mock_backend = MockCaptureBackend(initial_frame=None)
+        mock_backend.last_status = FrameStatus.ERROR
+
+        mgr = ScreenCaptureManager(
+            target_fps=20.0,
+            downsample_size=(64, 36),
+            on_frame=on_frame,
+            custom_backend=mock_backend,
+            stale_timeout_s=0.15,
+        )
+        assert mgr.start()
+        time.sleep(0.35)
+
+        assert mgr.health == CaptureHealth.STALE
+        assert len(none_received) >= 1
+        mgr.stop()
+
+    def test_black_cinematic_frames_are_healthy(self) -> None:
+        """Verify genuine black movie frames are classified as healthy capture, not error."""
+        from src.screen.analyzer import ScreenColorAnalyzer
+
+        analyzer = ScreenColorAnalyzer()
+        black_frame = np.zeros((36, 64, 3), dtype=np.uint8)
+
+        state = analyzer.process_frame(black_frame, timestamp=time.perf_counter())
+        assert state is not None
+        assert state.brightness == analyzer.settings.min_brightness
+        # Confirm capture health is OK
+        assert analyzer._fallback_mgr.health == CaptureHealth.OK

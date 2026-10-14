@@ -1,5 +1,6 @@
 """Unit tests for Hybrid AV synchronization fusing screen video with audio loudness and rhythm."""
 
+import time
 import numpy as np
 import pytest
 
@@ -158,3 +159,92 @@ class TestHybridAVProcessor:
         assert fused.rgb == (100, 100, 100)
         assert fused.brightness == 120
         assert not is_beat
+
+    def test_beat_deduplication_prevents_multiple_triggers(self) -> None:
+        """Verify the same AudioMetrics object cannot trigger multiple beats across callbacks."""
+        processor = HybridAVProcessor(
+            settings=HybridAVSettings(
+                hybrid_type=HybridType.RHYTHM,
+                audio_contribution=0.5,
+            )
+        )
+        video_state = LightingState(rgb=(200, 50, 50), brightness=100)
+        drum_metrics = _make_dummy_metrics(is_percussion=True)
+
+        # First arrival of audio frame: triggers beat
+        fused1, is_beat1, _ = processor.fuse_audio(drum_metrics, current_time=1.0)
+        assert is_beat1
+
+        # Second evaluation with the same audio metric (e.g. video callback using cached metric)
+        fused2, is_beat2, _ = processor.fuse_audio(drum_metrics, current_time=1.02)
+        assert not is_beat2
+
+        # Video arrival: must NOT trigger beat
+        fused_v, is_beat_v, _ = processor.fuse_video(video_state, current_time=1.03)
+        assert not is_beat_v
+
+    def test_audio_expiration_returns_to_video_only(self) -> None:
+        """Verify audio older than 350 ms expires and returns strictly to video state."""
+        processor = HybridAVProcessor(
+            settings=HybridAVSettings(
+                hybrid_type=HybridType.CINEMATIC,
+                audio_contribution=0.8,
+                min_brightness=25,
+                max_brightness=255,
+            )
+        )
+        video_state = LightingState(rgb=(50, 150, 250), brightness=80)
+        loud_metrics = _make_dummy_metrics(loudness=0.9)
+
+        # Fresh audio at t=10.0
+        processor.fuse_audio(loud_metrics, current_time=10.0)
+        fused_fresh, _, _ = processor.fuse_video(video_state, current_time=10.05)
+        assert fused_fresh.brightness > video_state.brightness
+
+        # At t=10.45s (>350ms elapsed without audio): audio expires
+        fused_expired, _, _ = processor.fuse_video(video_state, current_time=10.45)
+        # Returns exactly to base video brightness
+        assert fused_expired.brightness == video_state.brightness
+        assert fused_expired.rgb == (50, 150, 250)
+
+    def test_concurrent_fusion_thread_safety(self) -> None:
+        """Verify thread-safe fusion under high-frequency interleaved audio/video execution."""
+        import threading
+        processor = HybridAVProcessor(
+            settings=HybridAVSettings(
+                hybrid_type=HybridType.KICK,
+                audio_contribution=0.5,
+            )
+        )
+
+        errors = []
+
+        def video_worker():
+            for i in range(100):
+                try:
+                    v = LightingState(rgb=((i * 2) % 256, (i * 3) % 256, 120), brightness=90)
+                    state, is_beat, _ = processor.fuse_video(v, current_time=time.perf_counter())
+                    assert state.is_on
+                    assert 25 <= state.brightness <= 255
+                except Exception as exc:
+                    errors.append(exc)
+
+        def audio_worker():
+            for i in range(100):
+                try:
+                    m = _make_dummy_metrics(loudness=0.7, is_kick=(i % 10 == 0))
+                    state, is_beat, _ = processor.fuse_audio(m, current_time=time.perf_counter())
+                    assert state.is_on
+                    assert 25 <= state.brightness <= 255
+                except Exception as exc:
+                    errors.append(exc)
+
+        t_v = threading.Thread(target=video_worker)
+        t_a = threading.Thread(target=audio_worker)
+
+        t_v.start()
+        t_a.start()
+        t_v.join()
+        t_a.join()
+
+        assert len(errors) == 0

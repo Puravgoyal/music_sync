@@ -6,8 +6,8 @@
   "main_window_created": true,
   "connection_tested": true,
   "sync_started": true,
-  "audio_frames_processed": 287,
-  "commands_sent": 17,
+  "audio_frames_processed": 388,
+  "commands_sent": 6,
   "effect_switched": true,
   "sync_stopped": true,
   "restoration_result": "Successfully restored",
@@ -15,5 +15,11 @@
   "restoration_verified": true,
   "threads_terminated": true,
   "error": null,
-  "focus_mode": "rhythm"
+  "focus_mode": "rhythm",
+  "screen_sync_started": true,
+  "screen_frames_analyzed": 37,
+  "screen_commands_sent": 1,
+  "hybrid_sync_started": true,
+  "hybrid_frames_analyzed": 37,
+  "hybrid_commands_sent": 2
 }

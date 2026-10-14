@@ -148,6 +148,10 @@ class CaptureFallbackManager:
     def health(self) -> CaptureHealth:
         return self._health
 
+    @property
+    def is_fallback_active(self) -> bool:
+        return self._health != CaptureHealth.OK
+
     def record_frame(self, rgb: Tuple[int, int, int], brightness: int, now: Optional[float] = None) -> None:
         """Record successful capture frame arrival."""
         t = now if now is not None else time.perf_counter()

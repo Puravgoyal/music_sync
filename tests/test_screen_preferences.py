@@ -21,6 +21,8 @@ class TestScreenPreferences:
         assert prefs.detect_black_bars is True
         assert prefs.hybrid_type == "cinematic"
         assert prefs.audio_contribution == 0.35
+        assert prefs.hybrid_audio_focus == "full"
+        assert prefs.hybrid_beat_intensity == 1.0
 
     def test_validation_clamps_invalid_values(self) -> None:
         prefs = AppPreferences(
@@ -31,6 +33,8 @@ class TestScreenPreferences:
             edge_thickness=0.99,
             smoothing_preset="hyperdrive",
             audio_contribution=5.0,
+            hybrid_audio_focus="invalid_focus",
+            hybrid_beat_intensity=99.0,
         )
         prefs.validate()
 
@@ -41,6 +45,8 @@ class TestScreenPreferences:
         assert prefs.edge_thickness <= 0.45
         assert prefs.smoothing_preset == "cinematic"
         assert prefs.audio_contribution == 1.0
+        assert prefs.hybrid_audio_focus == "full"
+        assert prefs.hybrid_beat_intensity == 2.0
 
     def test_backward_compatibility_with_phase4_prefs_file(self, tmp_path: Path) -> None:
         # Simulate an older preferences file from Phase 4 that lacks Phase 5 keys

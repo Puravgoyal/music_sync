@@ -208,3 +208,79 @@ class TestUnifiedSyncEngine:
             assert not engine.is_running
             mock_ctrl.restore_state.assert_called_once()
             mock_ctrl.disconnect.assert_called_once()
+
+    async def test_hybrid_audio_focus_and_beat_intensity_propagation(self) -> None:
+        """Verify modifying Hybrid settings propagates to AudioCapture, Analyzer, and Processor."""
+        from src.audio.beat_detector import AudioFocus
+
+        mock_backend = MockCaptureBackend(initial_frame=np.full((36, 64, 3), [10, 50, 240], dtype=np.uint8))
+        engine = UnifiedSyncEngine(
+            dry_run=True,
+            sync_mode=SyncMode.HYBRID,
+            hybrid_type="rhythm",
+            hybrid_audio_focus="rhythm",
+            hybrid_beat_intensity=1.5,
+            custom_capture_backend=mock_backend,
+        )
+
+        with patch("src.sync.engine.AudioCapture") as mock_audio_cls:
+            mock_audio = MagicMock()
+            mock_audio_cls.return_value = mock_audio
+
+            await engine.start()
+            assert engine.audio_focus == AudioFocus.RHYTHM
+            assert engine.hybrid_processor.settings.audio_focus == AudioFocus.RHYTHM
+            assert engine.hybrid_processor.settings.beat_intensity == 1.5
+
+            # Dynamically switch to Kick Focus with new beat intensity
+            engine.set_hybrid_settings(audio_focus="kick", beat_intensity=0.8)
+            assert engine.audio_focus == AudioFocus.KICK
+            assert mock_audio.audio_focus == AudioFocus.KICK
+            assert engine.hybrid_processor.settings.audio_focus == AudioFocus.KICK
+            assert engine.hybrid_processor.settings.beat_intensity == 0.8
+
+            # Dynamically switch back to Full Music
+            engine.set_hybrid_settings(audio_focus="full", beat_intensity=1.2)
+            assert engine.audio_focus == AudioFocus.FULL_MUSIC
+            assert mock_audio.audio_focus == AudioFocus.FULL_MUSIC
+            assert engine.hybrid_processor.settings.audio_focus == AudioFocus.FULL_MUSIC
+            assert engine.hybrid_processor.settings.beat_intensity == 1.2
+
+            await engine.stop()
+
+    async def test_screen_capture_failure_and_recovery_in_engine(self) -> None:
+        """Verify sending None frame initiates fallback and subsequent frame recovers."""
+        mock_backend = MockCaptureBackend(initial_frame=np.full((36, 64, 3), [240, 20, 20], dtype=np.uint8))
+        engine = UnifiedSyncEngine(
+            dry_run=True,
+            sync_mode=SyncMode.SCREEN,
+            smoothing_preset="responsive",
+            custom_capture_backend=mock_backend,
+        )
+        await engine.start()
+
+        # Step 1: establish initial red video state
+        t0 = 10.0
+        for i in range(5):
+            engine._handle_screen_frame(np.full((36, 64, 3), [240, 20, 20], dtype=np.uint8), timestamp=t0 + i * 0.05)
+
+        status1 = engine.get_status()
+        assert status1.target_state.rgb[0] > 180
+
+        # Step 2: send prolonged None frame (capture failure / stale event) past full fade duration (3.2s)
+        for i in range(25):
+            engine._handle_screen_frame(None, timestamp=t0 + 1.5 + i * 0.1)
+
+        status_stale = engine.get_status()
+        # Fallback towards warm ambient (255, 214, 170) and min_brightness
+        assert status_stale.target_state.brightness == engine.settings.min_brightness
+
+        # Step 3: valid frame resumes (recovery)
+        for i in range(8):
+            engine._handle_screen_frame(np.full((36, 64, 3), [20, 240, 20], dtype=np.uint8), timestamp=t0 + 5.0 + i * 0.05)
+
+        status_recovered = engine.get_status()
+        # Green is dominant after recovery
+        assert status_recovered.target_state.rgb[1] > status_recovered.target_state.rgb[0]
+
+        await engine.stop()
